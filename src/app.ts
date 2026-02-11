@@ -44,12 +44,20 @@ export async function startTelegram(options: StartOptions) {
 
   // Verify connection to the OpenCode server and fetch available commands
   const opencodeCommands = new Set<string>();
+  let projectDirectory = "";
   try {
     const sessions = await client.session.list();
     if (sessions.error) {
       throw new Error(`Server returned error: ${JSON.stringify(sessions.error)}`);
     }
     console.log(`[Telegram] Connected to OpenCode server at ${url}`);
+
+    // Fetch the project directory (needed for SSE event subscription)
+    const pathResult = await client.path.get();
+    if (pathResult.data?.directory) {
+      projectDirectory = pathResult.data.directory;
+      console.log(`[Telegram] Project directory: ${projectDirectory}`);
+    }
 
     // Fetch available OpenCode commands
     const cmds = await client.command.list();
@@ -69,13 +77,15 @@ export async function startTelegram(options: StartOptions) {
 
   // Telegram-only commands that should not be forwarded to OpenCode
   const telegramCommands = new Set([
-    "start", "help", "new", "sessions", "switch", "title", "delete", "export",
+    "start", "help", "new", "sessions", "switch", "title", "delete", "export", "verbose",
   ]);
 
   // Map of chatId -> sessionId for the active session per chat
   const chatSessions = new Map<string, string>();
   // Set of all session IDs ever created/used by this bot (for filtering)
   const knownSessionIds = new Set<string>();
+  // Set of chatIds with verbose mode enabled
+  const chatVerboseMode = new Set<string>();
 
   /**
    * Save the chat-to-session mapping and known session IDs to disk.
@@ -85,6 +95,7 @@ export async function startTelegram(options: StartOptions) {
       const data = {
         active: Object.fromEntries(chatSessions),
         known: [...knownSessionIds],
+        verbose: [...chatVerboseMode],
       };
       writeFileSync(SESSIONS_FILE, JSON.stringify(data, null, 2));
     } catch (err) {
@@ -100,14 +111,16 @@ export async function startTelegram(options: StartOptions) {
     // Load from file (supports both old flat format and new {active, known} format)
     let storedActive: Record<string, string> = {};
     let storedKnown: string[] = [];
+    let storedVerbose: string[] = [];
     if (existsSync(SESSIONS_FILE)) {
       try {
         const raw = readFileSync(SESSIONS_FILE, "utf-8");
         const parsed = JSON.parse(raw);
         if (parsed.active && typeof parsed.active === "object") {
-          // New format: { active: {...}, known: [...] }
+          // New format: { active: {...}, known: [...], verbose: [...] }
           storedActive = parsed.active;
           storedKnown = parsed.known || [];
+          storedVerbose = parsed.verbose || [];
         } else {
           // Old format: flat { chatId: sessionId }
           storedActive = parsed;
@@ -118,6 +131,16 @@ export async function startTelegram(options: StartOptions) {
       } catch (err) {
         console.warn("[Telegram] Failed to parse sessions file:", err);
       }
+    }
+
+    // Restore verbose mode preferences
+    for (const chatId of storedVerbose) {
+      chatVerboseMode.add(chatId);
+    }
+    if (storedVerbose.length > 0) {
+      console.log(
+        `[Telegram] Restored verbose mode for ${storedVerbose.length} chat(s)`
+      );
     }
 
     // Fetch all server sessions once for validation and fallback matching
@@ -248,6 +271,60 @@ export async function startTelegram(options: StartOptions) {
   }
 
   /**
+   * Build a one-line summary for a tool call, picking the most meaningful input field.
+   */
+  function summarizeTool(
+    tool: string,
+    input?: { [key: string]: unknown }
+  ): string {
+    if (!input) return tool;
+
+    // Pick the most descriptive field based on common tool patterns
+    const summaryField =
+      input.filePath || input.path || input.command || input.pattern ||
+      input.url || input.query || input.content || input.prompt ||
+      input.description || input.name;
+
+    if (summaryField && typeof summaryField === "string") {
+      return `${tool} -- ${truncate(summaryField, 80)}`;
+    }
+
+    // For tools with a glob/include pattern
+    if (input.include && typeof input.include === "string") {
+      return `${tool} -- ${truncate(input.include, 80)}`;
+    }
+
+    return tool;
+  }
+
+  /**
+   * Send a message to Telegram, with Markdown fallback.
+   * When disableLinkPreview is true, link previews are suppressed (useful for verbose messages).
+   */
+  async function sendTelegramMessage(chatId: number, text: string, disableLinkPreview = false) {
+    const options: Record<string, unknown> = {
+      parse_mode: "Markdown",
+    };
+    if (disableLinkPreview) {
+      options.link_preview_options = { is_disabled: true };
+    }
+    try {
+      await bot.telegram.sendMessage(chatId, text, options);
+    } catch {
+      try {
+        const fallbackOptions: Record<string, unknown> = {};
+        if (disableLinkPreview) {
+          fallbackOptions.link_preview_options = { is_disabled: true };
+        }
+        await bot.telegram.sendMessage(chatId, text, fallbackOptions);
+      } catch (fallbackErr) {
+        console.error("[Telegram] Fallback error:", fallbackErr);
+      }
+    }
+  }
+
+
+  /**
    * Extract text from response parts and send to Telegram chat.
    */
   async function sendResponseToChat(
@@ -276,17 +353,173 @@ export async function startTelegram(options: StartOptions) {
     // Send the response, splitting if needed (Telegram has a 4096 char limit)
     const chunks = splitMessage(responseText, 4096);
     for (const chunk of chunks) {
-      try {
-        await bot.telegram.sendMessage(chatId, chunk, {
-          parse_mode: "Markdown",
-        });
-      } catch {
+      await sendTelegramMessage(chatId, chunk);
+    }
+  }
+
+  /**
+   * Send a prompt with streaming: fires the prompt asynchronously, then listens
+   * to SSE events to stream thinking and tool call updates to Telegram in real-time.
+   * The final text response is sent when the session goes idle.
+   */
+  async function sendPromptStreaming(
+    chatId: number,
+    sessionId: string,
+    promptBody: {
+      parts: Array<{ type: "text"; text: string }>;
+      model?: { providerID: string; modelID: string };
+    },
+    processingMsgId: number,
+    verbose = false
+  ) {
+    // Subscribe to SSE events before sending the prompt so we don't miss anything
+    const abortController = new AbortController();
+    // Subscribe to SSE events before sending the prompt so we don't miss anything
+    const subscribeOptions: Record<string, unknown> = {
+      signal: abortController.signal,
+    };
+    if (projectDirectory) {
+      subscribeOptions.query = { directory: projectDirectory };
+    }
+    const { stream } = await client.event.subscribe(subscribeOptions as never);
+    // Fire the prompt asynchronously (returns immediately)
+    const asyncResult = await client.session.promptAsync({
+      path: { id: sessionId },
+      body: promptBody,
+    });
+
+    if (asyncResult.error) {
+      abortController.abort();
+      throw new Error(`Prompt failed: ${JSON.stringify(asyncResult.error)}`);
+    }
+
+    // Track state as events stream in
+    let finalText = "";
+    let processingMsgDeleted = false;
+    const sentToolIds = new Set<string>();
+    const sentReasoningIds = new Set<string>();
+    // Buffer the latest reasoning text -- we send it when a non-reasoning part arrives
+    // so we get the complete thinking block rather than a partial one
+    let pendingReasoning: { id: string; text: string } | null = null;
+
+    /**
+     * Delete the "processing" message once, right before sending the first real output.
+     */
+    async function deleteProcessingMsg() {
+      if (!processingMsgDeleted) {
+        processingMsgDeleted = true;
         try {
-          await bot.telegram.sendMessage(chatId, chunk);
-        } catch (fallbackErr) {
-          console.error("[Telegram] Fallback error:", fallbackErr);
+          await bot.telegram.deleteMessage(chatId, processingMsgId);
+        } catch {
+          // Ignore
         }
       }
+    }
+
+    /**
+     * Flush any buffered reasoning to Telegram as a spoiler message.
+     */
+    async function flushReasoning() {
+      if (verbose && pendingReasoning && !sentReasoningIds.has(pendingReasoning.id)) {
+        sentReasoningIds.add(pendingReasoning.id);
+        await deleteProcessingMsg();
+        const truncated = truncate(pendingReasoning.text.replace(/\n/g, " "), 500);
+        await sendTelegramMessage(chatId, `\u{1F9E0} Thinking: ${truncated}`, true);
+      }
+      pendingReasoning = null;
+    }
+
+    try {
+      for await (const event of stream) {
+        const ev = event as { type: string; properties?: Record<string, unknown> };
+
+        if (ev.type === "message.part.updated" && ev.properties) {
+          const part = ev.properties.part as {
+            type: string;
+            sessionID?: string;
+            id?: string;
+            [key: string]: unknown;
+          };
+
+          // Only process events for our session
+          if (part.sessionID !== sessionId) continue;
+
+          const partText = part.text as string | undefined;
+
+          if (part.type === "reasoning" && part.id) {
+            // Buffer reasoning -- keep updating with the latest full text
+            if (partText) {
+              pendingReasoning = { id: part.id, text: partText };
+            }
+          } else if (part.type === "tool" && part.id) {
+            // A tool part arrived -- flush any pending reasoning first
+            await flushReasoning();
+
+            if (verbose) {
+              const state = part.state as {
+                status: string;
+                input?: { [key: string]: unknown };
+                error?: string;
+              } | undefined;
+
+              // Only send tool messages once they have a completed/error status
+              if (
+                state &&
+                (state.status === "completed" || state.status === "error") &&
+                !sentToolIds.has(part.id)
+              ) {
+              sentToolIds.add(part.id);
+              await deleteProcessingMsg();
+              const tool = part.tool as string;
+              const summary = summarizeTool(tool, state.input);
+              let line = `\u{2699}\u{FE0F} ${summary}`;
+              if (state.status === "error") {
+                line += ` \u{274C}`;
+              }
+              await sendTelegramMessage(chatId, line, true);
+              }
+            }
+          } else if (part.type === "text") {
+            // A text part arrived -- flush any pending reasoning first
+            await flushReasoning();
+
+            // Accumulate text for the final response (text parts carry the full text, not deltas)
+            const text = part.text as string | undefined;
+            if (text) {
+              finalText = text;
+            }
+          }
+        } else if (ev.type === "session.idle" && ev.properties) {
+          const idleSessionId = ev.properties.sessionID as string | undefined;
+          if (idleSessionId === sessionId) {
+            // Flush any remaining reasoning before finishing
+            await flushReasoning();
+            break;
+          }
+        } else if (ev.type === "session.error" && ev.properties) {
+          const errorSessionId = ev.properties.sessionID as string | undefined;
+          if (errorSessionId === sessionId) {
+            const error = ev.properties.error as { data?: { message?: string } } | undefined;
+            const errorMsg = error?.data?.message || "Unknown error";
+            throw new Error(`Session error: ${errorMsg}`);
+          }
+        }
+      }
+    } finally {
+      abortController.abort();
+    }
+
+    // Delete the processing message if it hasn't been deleted yet (non-verbose mode)
+    await deleteProcessingMsg();
+
+    // Send the final text response
+    if (!finalText) {
+      finalText = "The agent returned an empty response.";
+    }
+
+    const chunks = splitMessage(finalText, 4096);
+    for (const chunk of chunks) {
+      await sendTelegramMessage(chatId, chunk);
     }
   }
 
@@ -346,6 +579,8 @@ export async function startTelegram(options: StartOptions) {
       "/delete <number> - Delete a session\n" +
       "/export - Export the current session as a markdown file\n" +
       "/export full - Export with all details (thinking, costs, steps)\n" +
+      "/verbose - Toggle verbose mode (show thinking and tool calls)\n" +
+      "/verbose on|off - Set verbose mode explicitly\n" +
       "/help - Show this help message\n";
 
     if (opencodeCommands.size > 0) {
@@ -369,6 +604,8 @@ export async function startTelegram(options: StartOptions) {
       "/delete <number> - Delete a session\n" +
       "/export - Export the current session as a markdown file\n" +
       "/export full - Export with all details (thinking, costs, steps)\n" +
+      "/verbose - Toggle verbose mode (show thinking and tool calls)\n" +
+      "/verbose on|off - Set verbose mode explicitly\n" +
       "/help - Show this help message\n";
 
     if (opencodeCommands.size > 0) {
@@ -575,6 +812,34 @@ export async function startTelegram(options: StartOptions) {
       console.error("[Telegram] Error deleting session:", err);
       await ctx.reply("Failed to delete session.");
     }
+  });
+
+  // Handle /verbose command - toggle verbose mode for this chat
+  // Usage: /verbose, /verbose on, /verbose off
+  bot.command("verbose", (ctx) => {
+    const chatId = ctx.chat.id.toString();
+    const args = ctx.message.text.replace(/^\/verbose\s*/, "").trim().toLowerCase();
+
+    if (args === "on") {
+      chatVerboseMode.add(chatId);
+    } else if (args === "off") {
+      chatVerboseMode.delete(chatId);
+    } else {
+      if (chatVerboseMode.has(chatId)) {
+        chatVerboseMode.delete(chatId);
+      } else {
+        chatVerboseMode.add(chatId);
+      }
+    }
+
+    saveSessions();
+    const enabled = chatVerboseMode.has(chatId);
+    console.log(`[Telegram] Verbose mode ${enabled ? "enabled" : "disabled"} for chat ${chatId}`);
+    ctx.reply(
+      enabled
+        ? "Verbose mode enabled. Responses will include thinking and tool calls."
+        : "Verbose mode disabled. Responses will only show the assistant's text."
+    );
   });
 
   /**
@@ -941,21 +1206,15 @@ export async function startTelegram(options: StartOptions) {
         promptBody.model = { providerID, modelID };
       }
 
-      const result = await client.session.prompt({
-        path: { id: sessionId },
-        body: promptBody,
-      });
+      const verbose = chatVerboseMode.has(chatId);
 
-      if (result.error) {
-        throw new Error(`Prompt failed: ${JSON.stringify(result.error)}`);
-      }
-
-      const parts = (result.data?.parts || []) as Array<{
-        type: string;
-        text?: string;
-        [key: string]: unknown;
-      }>;
-      await sendResponseToChat(ctx.chat.id, parts, processingMsg.message_id);
+      await sendPromptStreaming(
+        ctx.chat.id,
+        sessionId,
+        promptBody,
+        processingMsg.message_id,
+        verbose
+      );
     } catch (err) {
       console.error("[Telegram] Error processing message:", err);
       await handleSessionError(chatId);
@@ -1000,6 +1259,7 @@ function truncate(text: string, maxLength: number): string {
   if (text.length <= maxLength) return text;
   return text.substring(0, maxLength - 3) + "...";
 }
+
 
 /**
  * Split a message into chunks that fit within Telegram's message size limit.

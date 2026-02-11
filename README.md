@@ -105,7 +105,29 @@ These are handled directly by the Telegram bot:
 | `/delete <id>` | Delete a session from the server |
 | `/export` | Export the current session as a markdown file |
 | `/export full` | Export with all details (thinking, costs, steps) |
+| `/verbose` | Toggle verbose mode (show thinking and tool calls in chat) |
+| `/verbose on|off` | Explicitly enable/disable verbose mode |
 | `/help` | Show available commands |
+
+### Verbose Mode
+
+By default, the bot only shows the assistant's final text response. Use `/verbose` to toggle verbose mode (or `/verbose on|off` to set it explicitly), which also displays:
+
+- **Thinking/reasoning** -- shown as plain text with a 🧠 prefix, truncated to 500 characters
+- **Tool calls** -- shown as a compact one-line summary (e.g. `> read -- src/app.ts`)
+
+Verbose mode is per-chat and persists across bot restarts. Use `/verbose` again to turn it off.
+
+Example with verbose mode on:
+
+```
+🧠 Thinking: Let me analyze the authentication flow and check for potential issues...
+
+⚙️ grep -- pattern: "authenticate" in src/
+⚙️ read -- src/auth/handler.ts
+
+Here's what I found in the auth module...
+```
 
 ### Session Export
 
