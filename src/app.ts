@@ -341,9 +341,9 @@ export async function startTelegram(options: StartOptions) {
       "Bot commands:\n" +
       "/new - Start a new conversation\n" +
       "/sessions - List your sessions\n" +
-      "/switch <id> - Switch to a different session\n" +
+      "/switch <number> - Switch to a different session\n" +
       "/title <text> - Rename the current session\n" +
-      "/delete <id> - Delete a session\n" +
+      "/delete <number> - Delete a session\n" +
       "/help - Show this help message\n";
 
     if (opencodeCommands.size > 0) {
@@ -362,9 +362,9 @@ export async function startTelegram(options: StartOptions) {
       "Bot commands:\n" +
       "/new - Start a new conversation\n" +
       "/sessions - List your sessions\n" +
-      "/switch <id> - Switch to a different session\n" +
+      "/switch <number> - Switch to a different session\n" +
       "/title <text> - Rename the current session\n" +
-      "/delete <id> - Delete a session\n" +
+      "/delete <number> - Delete a session\n" +
       "/help - Show this help message\n";
 
     if (opencodeCommands.size > 0) {
@@ -387,22 +387,41 @@ export async function startTelegram(options: StartOptions) {
     );
   });
 
+  /**
+   * Get the list of known sessions, sorted by most recently updated.
+   */
+  async function getKnownSessions() {
+    const list = await client.session.list();
+    if (!list.data || list.data.length === 0) return [];
+    return list.data
+      .filter((s) => knownSessionIds.has(s.id))
+      .sort((a, b) => b.time.updated - a.time.updated);
+  }
+
+  /**
+   * Resolve a user argument to a session. Accepts either a numeric index
+   * (1-based, as shown by /sessions) or a session ID / prefix.
+   */
+  function resolveSession(
+    sessions: Awaited<ReturnType<typeof getKnownSessions>>,
+    arg: string
+  ) {
+    // Try numeric index first
+    const num = parseInt(arg, 10);
+    if (!isNaN(num) && String(num) === arg && num >= 1 && num <= sessions.length) {
+      return sessions[num - 1];
+    }
+    // Fall back to ID / prefix match
+    return sessions.find((s) => s.id === arg || s.id.startsWith(arg));
+  }
+
   // Handle /sessions command - list Telegram bot sessions only
   bot.command("sessions", async (ctx) => {
     const chatId = ctx.chat.id.toString();
     const activeSessionId = chatSessions.get(chatId);
 
     try {
-      const list = await client.session.list();
-      if (!list.data || list.data.length === 0) {
-        await ctx.reply("No sessions found.");
-        return;
-      }
-
-      // Filter to only sessions created by this bot
-      const sessions = list.data
-        .filter((s) => knownSessionIds.has(s.id))
-        .sort((a, b) => b.time.updated - a.time.updated);
+      const sessions = await getKnownSessions();
 
       if (sessions.length === 0) {
         await ctx.reply("No sessions found.");
@@ -410,16 +429,15 @@ export async function startTelegram(options: StartOptions) {
       }
 
       let msg = "Your sessions:\n\n";
-      for (const session of sessions) {
+      sessions.forEach((session, i) => {
         const isActive = session.id === activeSessionId;
         const age = formatAge(session.time.updated);
-        const shortId = session.id.substring(0, 8);
-        const marker = isActive ? "[active] " : "";
-        msg += `${marker}${session.title} - ${age} (${shortId})\n`;
-      }
+        const marker = isActive ? " [active]" : "";
+        msg += `${i + 1}. ${session.title} - ${age}${marker}\n`;
+      });
 
-      msg += `\nUse /switch <id> to switch sessions.`;
-      msg += `\nUse /delete <id> to delete a session.`;
+      msg += `\nUse /switch <number> to switch sessions.`;
+      msg += `\nUse /delete <number> to delete a session.`;
 
       await ctx.reply(msg);
     } catch (err) {
@@ -428,29 +446,21 @@ export async function startTelegram(options: StartOptions) {
     }
   });
 
-  // Handle /switch <id> command - switch to a different session
+  // Handle /switch <number> command - switch to a different session
   bot.command("switch", async (ctx) => {
     const chatId = ctx.chat.id.toString();
     const args = ctx.message.text.replace(/^\/switch\s*/, "").trim();
 
     if (!args) {
       await ctx.reply(
-        "Usage: /switch <session-id>\n\nUse /sessions to see available sessions."
+        "Usage: /switch <number>\n\nUse /sessions to see available sessions."
       );
       return;
     }
 
     try {
-      // Fetch all sessions and find one matching the provided prefix
-      const list = await client.session.list();
-      if (!list.data) {
-        await ctx.reply("Failed to fetch sessions from the server.");
-        return;
-      }
-
-      const match = list.data
-        .filter((s) => knownSessionIds.has(s.id))
-        .find((s) => s.id === args || s.id.startsWith(args));
+      const sessions = await getKnownSessions();
+      const match = resolveSession(sessions, args);
 
       if (!match) {
         await ctx.reply(
@@ -465,10 +475,7 @@ export async function startTelegram(options: StartOptions) {
         `[Telegram] Switched chat ${chatId} to session ${match.id}`
       );
 
-      const shortId = match.id.substring(0, 8);
-      await ctx.reply(
-        `Switched to session: ${match.title} (${shortId})`
-      );
+      await ctx.reply(`Switched to session: ${match.title}`);
     } catch (err) {
       console.error("[Telegram] Error switching session:", err);
       await ctx.reply("Failed to switch session.");
@@ -513,29 +520,21 @@ export async function startTelegram(options: StartOptions) {
     }
   });
 
-  // Handle /delete <id> command - delete a session
+  // Handle /delete <number> command - delete a session
   bot.command("delete", async (ctx) => {
     const chatId = ctx.chat.id.toString();
     const args = ctx.message.text.replace(/^\/delete\s*/, "").trim();
 
     if (!args) {
       await ctx.reply(
-        "Usage: /delete <session-id>\n\nUse /sessions to see available sessions."
+        "Usage: /delete <number>\n\nUse /sessions to see available sessions."
       );
       return;
     }
 
     try {
-      // Fetch all sessions and find one matching the provided prefix
-      const list = await client.session.list();
-      if (!list.data) {
-        await ctx.reply("Failed to fetch sessions from the server.");
-        return;
-      }
-
-      const match = list.data
-        .filter((s) => knownSessionIds.has(s.id))
-        .find((s) => s.id === args || s.id.startsWith(args));
+      const sessions = await getKnownSessions();
+      const match = resolveSession(sessions, args);
 
       if (!match) {
         await ctx.reply(
@@ -566,9 +565,8 @@ export async function startTelegram(options: StartOptions) {
       knownSessionIds.delete(match.id);
       saveSessions();
 
-      const shortId = match.id.substring(0, 8);
       console.log(`[Telegram] Deleted session ${match.id}`);
-      await ctx.reply(`Deleted session: ${match.title} (${shortId})`);
+      await ctx.reply(`Deleted session: ${match.title}`);
     } catch (err) {
       console.error("[Telegram] Error deleting session:", err);
       await ctx.reply("Failed to delete session.");
