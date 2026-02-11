@@ -1,0 +1,175 @@
+# OpenCode Telegram Bot
+
+A Telegram bot that forwards messages to an [OpenCode](https://opencode.ai) agent and returns the responses. Each chat gets a persistent session, so the agent remembers conversation context across messages.
+
+## Prerequisites
+
+- [Node.js](https://nodejs.org/) 18+
+- [OpenCode](https://opencode.ai/docs/) installed and configured with at least one provider
+- A Telegram bot token (see below)
+
+## Creating a Telegram Bot
+
+1. Open Telegram and search for [@BotFather](https://t.me/BotFather).
+2. Send `/newbot` and follow the prompts:
+   - Choose a display name for your bot (e.g. "My OpenCode Bot").
+   - Choose a username. It must end in `bot` (e.g. `my_opencode_bot`).
+3. BotFather will reply with your **bot token**. It looks like `123456789:ABCdefGHIjklMNOpqrsTUVwxyz`. Copy it.
+4. Optionally, send `/setdescription` to BotFather to set a description for your bot.
+
+To find your **Telegram user ID** (for restricting access):
+
+1. Search for [@userinfobot](https://t.me/userinfobot) on Telegram.
+2. Send it any message. It will reply with your user ID.
+
+## Setup
+
+1. Install dependencies:
+
+   ```bash
+   npm install
+   ```
+
+2. Create a `.env` file in the project root:
+
+   ```env
+   TELEGRAM_BOT_TOKEN=your-bot-token-from-botfather
+   AUTHORIZED_TELEGRAM_USER_ID=your-telegram-user-id
+   ```
+
+   `AUTHORIZED_TELEGRAM_USER_ID` is optional. If set, only that user can interact with the bot. If omitted, the bot is open to everyone.
+
+## Usage
+
+You need two processes running: the OpenCode server and the Telegram bot.
+
+**Terminal 1** -- Start the OpenCode server:
+
+```bash
+npm run serve
+```
+
+This runs `opencode serve` on port 4096. You can pass flags through npm:
+
+```bash
+npm run serve -- --port 8080
+```
+
+**Terminal 2** -- Start the Telegram bot:
+
+```bash
+npm start
+```
+
+The bot connects to `http://localhost:4096` by default.
+
+### Options
+
+| Flag | Description | Default |
+|---|---|---|
+| `--url <url>` | OpenCode server URL | `http://localhost:4096` |
+| `--model <model>` | Model to use (provider/model format) | Server default |
+
+Examples:
+
+```bash
+# Connect to a custom server URL
+npm start -- --url http://192.168.1.100:4096
+
+# Use a specific model
+npm start -- --model anthropic/claude-sonnet-4-20250514
+```
+
+## Commands
+
+### Bot Commands
+
+These are handled directly by the Telegram bot:
+
+| Command | Description |
+|---|---|
+| `/start` | Welcome message |
+| `/new` | Start a new conversation |
+| `/sessions` | List all sessions with their IDs |
+| `/switch <id>` | Switch to a different session (prefix match supported) |
+| `/title <text>` | Rename the current session |
+| `/delete <id>` | Delete a session from the server |
+| `/help` | Show available commands |
+
+### OpenCode Commands
+
+Any `/` command that isn't a bot command is automatically forwarded to the OpenCode server via its command system. The bot fetches the list of available commands on startup and validates them.
+
+The exact list depends on your OpenCode configuration. Common commands include `/init` and `/review`. Send `/help` to the bot to see the full list.
+
+If you type an unknown command, the bot will reply with the list of available commands.
+
+### Regular Messages
+
+Any other text message is forwarded to the OpenCode agent as a prompt. Follow-up messages go into the same session, so the agent has full conversation context. Use `/new` when you want a fresh conversation.
+
+## Session Management
+
+Sessions are never deleted automatically. You can have multiple sessions and switch between them.
+
+When you send your first message, a new session is created and automatically titled with that message text. You can rename it anytime with `/title`.
+
+Example workflow:
+
+```
+You:  Help me refactor the auth module
+Bot:  [agent response]
+You:  /title Auth refactoring
+Bot:  Session renamed to: Auth refactoring
+
+You:  /new
+Bot:  Conversation reset.
+
+You:  Fix the broken tests
+Bot:  [agent response about tests - new session auto-titled "Fix the broken tests"]
+
+You:  /sessions
+Bot:  Your sessions:
+       [active] Fix the broken tests - 2 min ago (abc12345)
+       Auth refactoring - 1 hour ago (def67890)
+      Use /switch <id> to switch sessions.
+
+You:  /switch def6
+Bot:  Switched to session: Auth refactoring (def67890)
+
+You:  What were we working on?
+Bot:  [agent responds with context from the auth refactoring session]
+
+You:  /delete abc1
+Bot:  Deleted session: Fix the broken tests (abc12345)
+```
+
+The `/sessions` list only shows sessions created by the Telegram bot, not sessions from other OpenCode clients (like the TUI). You cannot delete the currently active session -- use `/new` or `/switch` first.
+
+## Session Persistence
+
+Sessions survive bot restarts. The bot saves the chat-to-session mapping to `sessions.json` in the project root. On startup, it:
+
+1. Loads the mapping from `sessions.json`
+2. Validates each session still exists on the OpenCode server
+3. If a stored session is gone, falls back to finding a matching session by title (`Telegram chat <chatId>`)
+4. If the file is missing entirely, scans all server sessions for ones matching the title convention
+
+This means you can restart the bot (or even delete `sessions.json`) and it will reconnect to existing sessions automatically.
+
+## Environment Variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | Yes | Bot token from BotFather |
+| `AUTHORIZED_TELEGRAM_USER_ID` | No | Restrict the bot to a single Telegram user |
+
+## Building
+
+To bundle the bot into a single file for deployment:
+
+```bash
+npm run build
+```
+
+This outputs to `dist/index.js` using [@vercel/ncc](https://github.com/vercel/ncc).

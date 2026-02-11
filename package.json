@@ -1,0 +1,26 @@
+{
+  "name": "opencode-telegram",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Telegram bot that forwards messages to an OpenCode agent",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "serve": "opencode serve",
+    "build": "ncc build src/index.ts --out dist"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@opencode-ai/sdk": "^1.1.56",
+    "telegraf": "^4.15.0",
+    "commander": "^13.1.0",
+    "dotenv": "^16.4.7",
+    "typescript": "^5.7.3"
+  },
+  "devDependencies": {
+    "@vercel/ncc": "^0.38.3",
+    "tsx": "^4.0.0",
+    "@types/node": "^20.0.0"
+  }
+}
