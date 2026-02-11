@@ -106,7 +106,7 @@ These are handled directly by the Telegram bot:
 | `/export` | Export the current session as a markdown file |
 | `/export full` | Export with all details (thinking, costs, steps) |
 | `/verbose` | Toggle verbose mode (show thinking and tool calls in chat) |
-| `/verbose on|off` | Explicitly enable/disable verbose mode |
+| `/verbose on\|off` | Explicitly enable/disable verbose mode |
 | `/model` | Show current model and usage hints |
 | `/model <keyword>` | Search models by keyword |
 | `/model <number>` | Switch to a model from the last search |
