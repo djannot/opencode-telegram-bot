@@ -9,9 +9,50 @@ dotenv.config();
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SESSIONS_FILE = resolve(__dirname, "..", "sessions.json");
 
+interface OpencodeClientLike {
+  session: {
+    list: (options?: any) => Promise<any>;
+    create: (options: any) => Promise<any>;
+    update: (options: any) => Promise<any>;
+    delete: (options: any) => Promise<any>;
+    get: (options: any) => Promise<any>;
+    messages: (options: any) => Promise<any>;
+    command: (options: any) => Promise<any>;
+    promptAsync: (options: any) => Promise<any>;
+  };
+  command: {
+    list: (options?: any) => Promise<any>;
+  };
+  path: {
+    get: (options?: any) => Promise<any>;
+  };
+  event: {
+    subscribe: (options?: any) => Promise<any>;
+  };
+}
+
 interface StartOptions {
   url: string;
   model?: string;
+  launch?: boolean;
+  client?: OpencodeClientLike;
+  botFactory?: (token: string) => TelegramBot;
+  sessionsFilePath?: string;
+}
+
+interface TelegramBot {
+  use: (fn: (ctx: any, next: () => Promise<void>) => Promise<void> | void) => void;
+  start: (fn: (ctx: any) => void | Promise<void>) => void;
+  help: (fn: (ctx: any) => void | Promise<void>) => void;
+  command: (command: string, fn: (ctx: any) => void | Promise<void>) => void;
+  on: (event: string, fn: (ctx: any) => void | Promise<void>) => void;
+  launch: () => Promise<void>;
+  stop: (reason?: string) => void;
+  telegram: {
+    sendMessage: (chatId: number, text: string, options?: Record<string, unknown>) => Promise<void>;
+    deleteMessage: (chatId: number, messageId: number) => Promise<void>;
+    sendDocument: (chatId: number, file: { source: Buffer; filename: string }) => Promise<void>;
+  };
 }
 
 export async function startTelegram(options: StartOptions) {
@@ -39,8 +80,10 @@ export async function startTelegram(options: StartOptions) {
     console.log(`[Telegram] Bot is restricted to user ID: ${authorizedUserId}`);
   }
 
+  const sessionsFile = options.sessionsFilePath || SESSIONS_FILE;
+
   // Initialize OpenCode client
-  const client = createOpencodeClient({ baseUrl: url });
+  const client = options.client || createOpencodeClient({ baseUrl: url });
 
   // Verify connection to the OpenCode server and fetch available commands
   const opencodeCommands = new Set<string>();
@@ -97,7 +140,7 @@ export async function startTelegram(options: StartOptions) {
         known: [...knownSessionIds],
         verbose: [...chatVerboseMode],
       };
-      writeFileSync(SESSIONS_FILE, JSON.stringify(data, null, 2));
+      writeFileSync(sessionsFile, JSON.stringify(data, null, 2));
     } catch (err) {
       console.error("[Telegram] Failed to save sessions file:", err);
     }
@@ -112,9 +155,9 @@ export async function startTelegram(options: StartOptions) {
     let storedActive: Record<string, string> = {};
     let storedKnown: string[] = [];
     let storedVerbose: string[] = [];
-    if (existsSync(SESSIONS_FILE)) {
+    if (existsSync(sessionsFile)) {
       try {
-        const raw = readFileSync(SESSIONS_FILE, "utf-8");
+        const raw = readFileSync(sessionsFile, "utf-8");
         const parsed = JSON.parse(raw);
         if (parsed.active && typeof parsed.active === "object") {
           // New format: { active: {...}, known: [...], verbose: [...] }
@@ -126,7 +169,7 @@ export async function startTelegram(options: StartOptions) {
           storedActive = parsed;
         }
         console.log(
-          `[Telegram] Loaded ${Object.keys(storedActive).length} active session(s) and ${storedKnown.length} known session(s) from ${SESSIONS_FILE}`
+          `[Telegram] Loaded ${Object.keys(storedActive).length} active session(s) and ${storedKnown.length} known session(s) from ${sessionsFile}`
         );
       } catch (err) {
         console.warn("[Telegram] Failed to parse sessions file:", err);
@@ -235,7 +278,7 @@ export async function startTelegram(options: StartOptions) {
           `Failed to create session: ${JSON.stringify(session.error)}`
         );
       }
-      sessionId = session.data.id;
+      sessionId = session.data.id as string;
       chatSessions.set(chatId, sessionId);
       knownSessionIds.add(sessionId);
       newlyCreatedSessions.add(sessionId);
@@ -248,7 +291,7 @@ export async function startTelegram(options: StartOptions) {
         `[Telegram] Using existing session ${sessionId} for chat ${chatId}`
       );
     }
-    return sessionId;
+    return sessionId as string;
   }
 
   /**
@@ -547,7 +590,9 @@ export async function startTelegram(options: StartOptions) {
   }
 
   // Initialize Telegram bot
-  const bot = new Telegraf(token);
+  const bot: TelegramBot = options.botFactory
+    ? options.botFactory(token)
+    : (new Telegraf(token) as unknown as TelegramBot);
 
   // Middleware to check if the user is authorized
   bot.use((ctx, next) => {
@@ -628,15 +673,18 @@ export async function startTelegram(options: StartOptions) {
     );
   });
 
+  type SessionListItem = { id: string; title: string; time: { updated: number } };
+
   /**
    * Get the list of known sessions, sorted by most recently updated.
    */
-  async function getKnownSessions() {
+  async function getKnownSessions(): Promise<SessionListItem[]> {
     const list = await client.session.list();
-    if (!list.data || list.data.length === 0) return [];
-    return list.data
-      .filter((s) => knownSessionIds.has(s.id))
-      .sort((a, b) => b.time.updated - a.time.updated);
+    const data = (list.data || []) as SessionListItem[];
+    if (data.length === 0) return [];
+    return data
+      .filter((s: SessionListItem) => knownSessionIds.has(s.id))
+      .sort((a: SessionListItem, b: SessionListItem) => b.time.updated - a.time.updated);
   }
 
   /**
@@ -653,7 +701,7 @@ export async function startTelegram(options: StartOptions) {
       return sessions[num - 1];
     }
     // Fall back to ID / prefix match
-    return sessions.find((s) => s.id === arg || s.id.startsWith(arg));
+    return sessions.find((s: SessionListItem) => s.id === arg || s.id.startsWith(arg));
   }
 
   // Handle /sessions command - list Telegram bot sessions only
@@ -670,7 +718,7 @@ export async function startTelegram(options: StartOptions) {
       }
 
       let msg = "Your sessions:\n\n";
-      sessions.forEach((session, i) => {
+      sessions.forEach((session: SessionListItem, i: number) => {
         const isActive = session.id === activeSessionId;
         const age = formatAge(session.time.updated);
         const marker = isActive ? " [active]" : "";
@@ -1224,18 +1272,22 @@ export async function startTelegram(options: StartOptions) {
     }
   });
 
-  try {
-    // Start the bot
-    await bot.launch();
-    console.log("[Telegram] Bot is running");
+  if (options.launch !== false) {
+    try {
+      // Start the bot
+      await bot.launch();
+      console.log("[Telegram] Bot is running");
 
-    // Enable graceful stop
-    process.once("SIGINT", () => bot.stop("SIGINT"));
-    process.once("SIGTERM", () => bot.stop("SIGTERM"));
-  } catch (error) {
-    console.error("Unable to start the Telegram bot:", error);
-    throw error;
+      // Enable graceful stop
+      process.once("SIGINT", () => bot.stop("SIGINT"));
+      process.once("SIGTERM", () => bot.stop("SIGTERM"));
+    } catch (error) {
+      console.error("Unable to start the Telegram bot:", error);
+      throw error;
+    }
   }
+
+  return bot;
 }
 
 /**

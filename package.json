@@ -14,7 +14,10 @@
     "start": "tsx src/index.ts",
     "serve": "opencode serve",
     "build": "ncc build src/index.ts --out dist",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "test:integration": "vitest run tests/integration.test.ts"
   },
   "keywords": [
     "opencode",
@@ -35,6 +38,7 @@
   "devDependencies": {
     "@vercel/ncc": "^0.38.3",
     "tsx": "^4.0.0",
-    "@types/node": "^20.0.0"
+    "@types/node": "^20.0.0",
+    "vitest": "^2.1.5"
   }
 }
