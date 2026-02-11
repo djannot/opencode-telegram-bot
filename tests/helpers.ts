@@ -8,10 +8,12 @@ export function createMockBot() {
   let startHandler: ((ctx: any) => Promise<void> | void) | null = null;
   let helpHandler: ((ctx: any) => Promise<void> | void) | null = null;
   const eventHandlers = new Map<string, (ctx: any) => Promise<void> | void>();
+  const actionHandlers: Array<{ trigger: string | RegExp; handler: (ctx: any) => Promise<void> | void }> = [];
 
   const sentMessages: Array<{ chatId: number; text: string; options?: Record<string, unknown> }> = [];
   const deletedMessages: Array<{ chatId: number; messageId: number }> = [];
   const sentDocuments: Array<{ chatId: number; filename: string; content: string }> = [];
+  const editedMessages: Array<{ chatId: number; text: string; options?: Record<string, unknown> }> = [];
   let messageId = 1;
 
   const telegram = {
@@ -48,6 +50,9 @@ export function createMockBot() {
     on(event: string, fn: (ctx: any) => Promise<void> | void) {
       eventHandlers.set(event, fn);
     },
+    action(trigger: string | RegExp, fn: (ctx: any) => Promise<void> | void) {
+      actionHandlers.push({ trigger, handler: fn });
+    },
     launch: vi.fn(async () => {}),
     stop: vi.fn(() => {}),
     telegram,
@@ -70,8 +75,8 @@ export function createMockBot() {
       chat: { id: chatId },
       message: { text, from: { id: userId } },
       from: { id: userId },
-      reply: async (replyText: string) => {
-        return telegram.sendMessage(chatId, replyText);
+      reply: async (replyText: string, options?: Record<string, unknown>) => {
+        return telegram.sendMessage(chatId, replyText, options);
       },
     };
     const commandMatch = text.match(/^\/(\w+)/);
@@ -111,8 +116,8 @@ export function createMockBot() {
         from: { id: userId },
       },
       from: { id: userId },
-      reply: async (replyText: string) => {
-        return telegram.sendMessage(chatId, replyText);
+      reply: async (replyText: string, options?: Record<string, unknown>) => {
+        return telegram.sendMessage(chatId, replyText, options);
       },
     };
 
@@ -137,8 +142,8 @@ export function createMockBot() {
         from: { id: userId },
       },
       from: { id: userId },
-      reply: async (replyText: string) => {
-        return telegram.sendMessage(chatId, replyText);
+      reply: async (replyText: string, options?: Record<string, unknown>) => {
+        return telegram.sendMessage(chatId, replyText, options);
       },
     };
 
@@ -147,15 +152,72 @@ export function createMockBot() {
     await dispatchWithContext(ctx, handler);
   }
 
+  async function dispatchCallbackQuery(params: {
+    data: string;
+    chatId?: number;
+    userId?: number;
+    messageId?: number;
+  }) {
+    const chatId = params.chatId ?? 1;
+    const userId = params.userId ?? 1;
+    const messageIdToEdit = params.messageId ?? 1;
+    const ctx: any = {
+      chat: { id: chatId },
+      from: { id: userId },
+      callbackQuery: {
+        data: params.data,
+        message: {
+          message_id: messageIdToEdit,
+          chat: { id: chatId },
+        },
+        from: { id: userId },
+      },
+      answerCbQuery: vi.fn(async () => {}),
+      editMessageText: vi.fn(async (text: string, options?: Record<string, unknown>) => {
+        editedMessages.push({ chatId, text, options });
+      }),
+      reply: async (replyText: string, options?: Record<string, unknown>) => {
+        return telegram.sendMessage(chatId, replyText, options);
+      },
+    };
+
+    let matchEntry:
+      | { trigger: string | RegExp; handler: (ctx: any) => Promise<void> | void }
+      | undefined;
+
+    for (const entry of actionHandlers) {
+      if (typeof entry.trigger === "string") {
+        if (entry.trigger === params.data) {
+          matchEntry = entry;
+          break;
+        }
+        continue;
+      }
+
+      const match = entry.trigger.exec(params.data);
+      if (match) {
+        ctx.match = match;
+        matchEntry = entry;
+        break;
+      }
+    }
+
+    if (!matchEntry) return;
+
+    await dispatchWithContext(ctx, matchEntry.handler);
+  }
+
   return {
     bot,
     telegram,
     sentMessages,
     deletedMessages,
     sentDocuments,
+    editedMessages,
     dispatchText,
     dispatchDocument,
     dispatchPhoto,
+    dispatchCallbackQuery,
   };
 }
 

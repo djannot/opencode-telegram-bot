@@ -53,6 +53,7 @@ interface TelegramBot {
   help: (fn: (ctx: any) => void | Promise<void>) => void;
   command: (command: string, fn: (ctx: any) => void | Promise<void>) => void;
   on: (event: string, fn: (ctx: any) => void | Promise<void>) => void;
+  action: (trigger: string | RegExp, fn: (ctx: any) => void | Promise<void>) => void;
   launch: () => Promise<void>;
   stop: (reason?: string) => void;
   telegram: {
@@ -352,6 +353,27 @@ export async function startTelegram(options: StartOptions) {
     }
 
     return promptBody;
+  }
+
+  function getChatIdFromContext(ctx: any) {
+    const direct = ctx.chat?.id;
+    if (direct) return direct.toString();
+    const fromCallback = ctx.callbackQuery?.message?.chat?.id;
+    if (fromCallback) return fromCallback.toString();
+    return null;
+  }
+
+  async function answerAndEdit(ctx: any, text: string) {
+    if (typeof ctx.answerCbQuery === "function") {
+      await ctx.answerCbQuery();
+    }
+
+    if (typeof ctx.editMessageText === "function") {
+      await ctx.editMessageText(text);
+      return;
+    }
+
+    await ctx.reply(text);
   }
 
   async function getTelegramFileUrl(fileId: string): Promise<string> {
@@ -750,9 +772,7 @@ export async function startTelegram(options: StartOptions) {
       "Bot commands:\n" +
       "/new - Start a new conversation\n" +
       "/sessions - List your sessions\n" +
-      "/switch <number> - Switch to a different session\n" +
       "/title <text> - Rename the current session\n" +
-      "/delete <number> - Delete a session\n" +
       "/export - Export the current session as a markdown file\n" +
       "/export full - Export with all details (thinking, costs, steps)\n" +
       "/verbose - Toggle verbose mode (show thinking and tool calls)\n" +
@@ -777,9 +797,7 @@ export async function startTelegram(options: StartOptions) {
       "Bot commands:\n" +
       "/new - Start a new conversation\n" +
       "/sessions - List your sessions\n" +
-      "/switch <number> - Switch to a different session\n" +
       "/title <text> - Rename the current session\n" +
-      "/delete <number> - Delete a session\n" +
       "/export - Export the current session as a markdown file\n" +
       "/export full - Export with all details (thinking, costs, steps)\n" +
       "/verbose - Toggle verbose mode (show thinking and tool calls)\n" +
@@ -823,19 +841,12 @@ export async function startTelegram(options: StartOptions) {
   }
 
   /**
-   * Resolve a user argument to a session. Accepts either a numeric index
-   * (1-based, as shown by /sessions) or a session ID / prefix.
+   * Resolve a user argument to a session ID / prefix.
    */
   function resolveSession(
     sessions: Awaited<ReturnType<typeof getKnownSessions>>,
     arg: string
   ) {
-    // Try numeric index first
-    const num = parseInt(arg, 10);
-    if (!isNaN(num) && String(num) === arg && num >= 1 && num <= sessions.length) {
-      return sessions[num - 1];
-    }
-    // Fall back to ID / prefix match
     return sessions.find((s: SessionListItem) => s.id === arg || s.id.startsWith(arg));
   }
 
@@ -852,32 +863,56 @@ export async function startTelegram(options: StartOptions) {
         return;
       }
 
-      let msg = "Your sessions:\n\n";
-      sessions.forEach((session: SessionListItem, i: number) => {
-        const isActive = session.id === activeSessionId;
-        const age = formatAge(session.time.updated);
-        const marker = isActive ? " [active]" : "";
-        msg += `${i + 1}. ${session.title} - ${age}${marker}\n`;
+      const activeSession = sessions.find((session) => session.id === activeSessionId);
+      const msgLines = ["Your sessions:"];
+      if (activeSession) {
+        msgLines.push(`Current session: ${activeSession.title}`);
+      }
+
+      const otherSessions = sessions.filter(
+        (session) => session.id !== activeSessionId
+      );
+      if (otherSessions.length === 0) {
+        msgLines.push("This is your only session.");
+        await ctx.reply(msgLines.join("\n"));
+        return;
+      }
+
+      msgLines.push("Tap a session to switch or delete.");
+
+      const keyboard: Array<Array<{ text: string; callback_data: string }>> = [];
+      otherSessions.forEach((session) => {
+        keyboard.push([
+          {
+            text: session.title,
+            callback_data: `switch:${session.id}`,
+          },
+          {
+            text: "Delete",
+            callback_data: `delete:${session.id}`,
+          },
+        ]);
       });
 
-      msg += `\nUse /switch <number> to switch sessions.`;
-      msg += `\nUse /delete <number> to delete a session.`;
-
-      await ctx.reply(msg);
+      await ctx.reply(msgLines.join("\n"), {
+        reply_markup: {
+          inline_keyboard: keyboard,
+        },
+      });
     } catch (err) {
       console.error("[Telegram] Error listing sessions:", err);
       await ctx.reply("Failed to list sessions.");
     }
   });
 
-  // Handle /switch <number> command - switch to a different session
+  // Handle /switch <id> command - switch to a different session
   bot.command("switch", async (ctx) => {
     const chatId = ctx.chat.id.toString();
     const args = ctx.message.text.replace(/^\/switch\s*/, "").trim();
 
     if (!args) {
       await ctx.reply(
-        "Usage: /switch <number>\n\nUse /sessions to see available sessions."
+        "Usage: /switch <session id>\n\nUse /sessions to see available sessions."
       );
       return;
     }
@@ -944,14 +979,14 @@ export async function startTelegram(options: StartOptions) {
     }
   });
 
-  // Handle /delete <number> command - delete a session
+  // Handle /delete <id> command - delete a session
   bot.command("delete", async (ctx) => {
     const chatId = ctx.chat.id.toString();
     const args = ctx.message.text.replace(/^\/delete\s*/, "").trim();
 
     if (!args) {
       await ctx.reply(
-        "Usage: /delete <number>\n\nUse /sessions to see available sessions."
+        "Usage: /delete <session id>\n\nUse /sessions to see available sessions."
       );
       return;
     }
@@ -994,6 +1029,70 @@ export async function startTelegram(options: StartOptions) {
     } catch (err) {
       console.error("[Telegram] Error deleting session:", err);
       await ctx.reply("Failed to delete session.");
+    }
+  });
+
+
+  bot.action(/^switch:(.+)$/, async (ctx) => {
+    const chatId = getChatIdFromContext(ctx);
+    const sessionId = ctx.match?.[1];
+    if (!chatId || !sessionId) return;
+
+    try {
+      const sessions = await getKnownSessions();
+      const match = sessions.find((session) => session.id === sessionId);
+      if (!match) {
+        await answerAndEdit(ctx, "Session not found. Use /sessions to refresh.");
+        return;
+      }
+
+      chatSessions.set(chatId, match.id);
+      saveSessions();
+      console.log(`[Telegram] Switched chat ${chatId} to session ${match.id}`);
+      await answerAndEdit(ctx, `Switched to session: ${match.title}`);
+    } catch (err) {
+      console.error("[Telegram] Error switching session:", err);
+      await answerAndEdit(ctx, "Failed to switch session.");
+    }
+  });
+
+  bot.action(/^delete:(.+)$/, async (ctx) => {
+    const chatId = getChatIdFromContext(ctx);
+    const sessionId = ctx.match?.[1];
+    if (!chatId || !sessionId) return;
+
+    try {
+      const sessions = await getKnownSessions();
+      const match = sessions.find((session) => session.id === sessionId);
+      if (!match) {
+        await answerAndEdit(ctx, "Session not found. Use /sessions to refresh.");
+        return;
+      }
+
+      const activeSessionId = chatSessions.get(chatId);
+      if (match.id === activeSessionId) {
+        await answerAndEdit(
+          ctx,
+          "Cannot delete the active session. Use /new or /switch first, then delete it."
+        );
+        return;
+      }
+
+      const result = await client.session.delete({
+        path: { id: match.id },
+      });
+
+      if (result.error) {
+        throw new Error(JSON.stringify(result.error));
+      }
+
+      knownSessionIds.delete(match.id);
+      saveSessions();
+      console.log(`[Telegram] Deleted session ${match.id}`);
+      await answerAndEdit(ctx, `Deleted session: ${match.title}`);
+    } catch (err) {
+      console.error("[Telegram] Error deleting session:", err);
+      await answerAndEdit(ctx, "Failed to delete session.");
     }
   });
 
@@ -1060,7 +1159,7 @@ export async function startTelegram(options: StartOptions) {
   }
 
   // Handle /model command
-  // Usage: /model, /model <keyword>, /model <number>, /model default
+  // Usage: /model, /model <keyword>, /model default
   bot.command("model", async (ctx) => {
     const chatId = ctx.chat.id.toString();
     const args = ctx.message.text.replace(/^\/model\s*/, "").trim();
@@ -1082,25 +1181,6 @@ export async function startTelegram(options: StartOptions) {
       return;
     }
 
-    const asNumber = Number.parseInt(args, 10);
-    if (!Number.isNaN(asNumber) && String(asNumber) === args) {
-      const results = chatModelSearchResults.get(chatId) || [];
-      if (results.length === 0) {
-        await ctx.reply("No recent search results. Use /model <keyword> first.");
-        return;
-      }
-      if (asNumber < 1 || asNumber > results.length) {
-        await ctx.reply("Invalid selection. Use /model <number> from the latest search results.");
-        return;
-      }
-      const selection = results[asNumber - 1];
-      const value = `${selection.providerID}/${selection.modelID}`;
-      chatModelOverride.set(chatId, value);
-      saveSessions();
-      await ctx.reply(`Switched to ${selection.displayName}`);
-      return;
-    }
-
     try {
       const results = await searchModels(args);
       if (results.length === 0) {
@@ -1111,21 +1191,62 @@ export async function startTelegram(options: StartOptions) {
       const limited = results.slice(0, 10);
       chatModelSearchResults.set(chatId, limited);
 
-      let msg = `Models matching "${args}":\n\n`;
-      for (const [index, item] of limited.entries()) {
-        msg += `${index + 1}. ${item.displayName}\n`;
-      }
-
+      let msg = `Models matching "${args}":`;
       if (results.length > limited.length) {
         msg += `\nFound ${results.length} models. Refine your search to narrow the list.`;
       }
+      msg += "\nTap a model to select.";
 
-      msg += "\nUse /model <number> to select.";
-      await ctx.reply(msg);
+      const keyboard = limited.map((item, index) => [
+        {
+          text: item.displayName,
+          callback_data: `model:${index + 1}`,
+        },
+      ]);
+      keyboard.push([
+        { text: "Reset to default", callback_data: "model_default" },
+      ]);
+
+      await ctx.reply(msg, {
+        reply_markup: {
+          inline_keyboard: keyboard,
+        },
+      });
     } catch (err) {
       console.error("[Telegram] Error searching models:", err);
       await ctx.reply("Failed to list models. Try again later.");
     }
+  });
+
+  bot.action(/^model:(\d+)$/, async (ctx) => {
+    const chatId = getChatIdFromContext(ctx);
+    const indexText = ctx.match?.[1];
+    if (!chatId || !indexText) return;
+
+    const selectionIndex = Number.parseInt(indexText, 10);
+    const results = chatModelSearchResults.get(chatId) || [];
+    if (results.length === 0) {
+      await answerAndEdit(ctx, "No recent search results. Use /model <keyword> first.");
+      return;
+    }
+    if (selectionIndex < 1 || selectionIndex > results.length) {
+      await answerAndEdit(ctx, "Invalid selection. Use the latest model search results.");
+      return;
+    }
+
+    const selection = results[selectionIndex - 1];
+    const value = `${selection.providerID}/${selection.modelID}`;
+    chatModelOverride.set(chatId, value);
+    saveSessions();
+    await answerAndEdit(ctx, `Switched to ${selection.displayName}`);
+  });
+
+  bot.action("model_default", async (ctx) => {
+    const chatId = getChatIdFromContext(ctx);
+    if (!chatId) return;
+    chatModelOverride.delete(chatId);
+    saveSessions();
+    await answerAndEdit(ctx, "Model reset to the default model.");
   });
 
   // Handle /usage command - show token and cost usage for current session
@@ -1614,20 +1735,6 @@ export async function startTelegram(options: StartOptions) {
   }
 
   return bot;
-}
-
-/**
- * Format a Unix timestamp (seconds) into a human-readable relative time.
- */
-function formatAge(timestamp: number): string {
-  const now = Date.now() / 1000;
-  const diff = now - timestamp;
-
-  if (diff < 60) return "just now";
-  if (diff < 3600) return `${Math.floor(diff / 60)} min ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)} hours ago`;
-  if (diff < 604800) return `${Math.floor(diff / 86400)} days ago`;
-  return `${Math.floor(diff / 604800)} weeks ago`;
 }
 
 /**

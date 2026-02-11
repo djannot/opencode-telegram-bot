@@ -192,9 +192,9 @@ describe("Telegram bot", () => {
     expect(texts.join("\n")).toContain("Final response");
   });
 
-  it("searches models and switches via /model", async () => {
+  it("searches models and switches via inline button", async () => {
     const sessionsFilePath = createTempSessionsFile();
-    const { bot, dispatchText, sentMessages } = createMockBot();
+    const { bot, dispatchText, dispatchCallbackQuery, sentMessages } = createMockBot();
 
     const promptAsync = vi.fn(async () => ({ data: undefined, error: undefined }));
     const client = createMockClient({
@@ -243,14 +243,98 @@ describe("Telegram bot", () => {
     });
 
     await dispatchText("/model codex");
-    const listText = sentMessages.map((m) => m.text).join("\n");
-    expect(listText).toContain("1. gpt-5.2-codex (openai)");
+    const lastMessage = sentMessages.at(-1);
+    const keyboard = (lastMessage?.options as any)?.reply_markup?.inline_keyboard;
+    expect(Array.isArray(keyboard)).toBe(true);
 
-    await dispatchText("/model 1");
+    await dispatchCallbackQuery({ data: "model:1" });
     await dispatchText("Hello");
 
     const call = (promptAsync as any).mock.calls.at(-1)?.[0];
     expect(call?.body?.model).toEqual({ providerID: "openai", modelID: "gpt-5.2-codex" });
+  });
+
+  it("renders model search results with inline buttons", async () => {
+    const sessionsFilePath = createTempSessionsFile();
+    const { bot, dispatchText, sentMessages } = createMockBot();
+
+    const client = createMockClient({
+      provider: {
+        list: vi.fn(async () => ({
+          data: {
+            connected: ["openai"],
+            all: [
+              {
+                id: "openai",
+                name: "OpenAI",
+                models: {
+                  "gpt-5.2-codex": { name: "gpt-5.2-codex" },
+                  "gpt-4.1": { name: "gpt-4.1" },
+                },
+              },
+            ],
+          },
+          error: undefined,
+        })),
+      },
+    });
+
+    await startTelegram({
+      url: "http://localhost:4096",
+      launch: false,
+      client,
+      botFactory: () => bot as any,
+      sessionsFilePath,
+    });
+
+    await dispatchText("/model gpt");
+    const lastMessage = sentMessages.at(-1);
+    const keyboard = (lastMessage?.options as any)?.reply_markup?.inline_keyboard;
+    expect(Array.isArray(keyboard)).toBe(true);
+    expect(keyboard[0][0].text).toBe("gpt-5.2-codex (openai)");
+    expect(keyboard[0][0].callback_data).toBe("model:1");
+    expect(keyboard.at(-1)[0].callback_data).toBe("model_default");
+  });
+
+  it("switches models via inline button", async () => {
+    const sessionsFilePath = createTempSessionsFile();
+    const { bot, dispatchText, dispatchCallbackQuery, editedMessages } = createMockBot();
+
+    const client = createMockClient({
+      provider: {
+        list: vi.fn(async () => ({
+          data: {
+            connected: ["openai"],
+            all: [
+              {
+                id: "openai",
+                name: "OpenAI",
+                models: {
+                  "gpt-5.2-codex": { name: "gpt-5.2-codex" },
+                  "gpt-4.1": { name: "gpt-4.1" },
+                },
+              },
+            ],
+          },
+          error: undefined,
+        })),
+      },
+    });
+
+    await startTelegram({
+      url: "http://localhost:4096",
+      launch: false,
+      client,
+      botFactory: () => bot as any,
+      sessionsFilePath,
+    });
+
+    await dispatchText("/model gpt");
+    await dispatchCallbackQuery({ data: "model:1" });
+
+    const data = JSON.parse(readFileSync(sessionsFilePath, "utf-8"));
+    expect(data.models?.["1"]).toBe("openai/gpt-5.2-codex");
+    expect(editedMessages.at(-1)?.text).toContain("Switched to gpt-5.2-codex");
   });
 
   it("resets model override with /model default", async () => {
@@ -538,7 +622,7 @@ describe("Telegram bot", () => {
     expect(doc.content).toContain("# Test");
   });
 
-  it("lists sessions and switches by index", async () => {
+  it("lists sessions and switches by id", async () => {
     const sessionsFilePath = createTempSessionsFile();
     const { bot, dispatchText, sentMessages } = createMockBot();
 
@@ -571,12 +655,170 @@ describe("Telegram bot", () => {
     });
 
     await dispatchText("/sessions");
-    expect(sentMessages.map((m) => m.text).join("\n")).toContain("First");
-    expect(sentMessages.map((m) => m.text).join("\n")).toContain("Second");
+    const lastMessage = sentMessages.at(-1);
+    const keyboard = (lastMessage?.options as any)?.reply_markup?.inline_keyboard;
+    expect(Array.isArray(keyboard)).toBe(true);
 
-    await dispatchText("/switch 2");
+    await dispatchText("/switch ses_b");
     const data = JSON.parse(readFileSync(sessionsFilePath, "utf-8"));
-    expect(data.active["1"]).toBe("ses_a");
+    expect(data.active["1"]).toBe("ses_b");
+  });
+
+  it("renders session list with inline buttons", async () => {
+    const sessionsFilePath = createTempSessionsFile();
+    const { bot, dispatchText, sentMessages } = createMockBot();
+
+    const client = createMockClient({
+      session: {
+        list: vi.fn(async () => ({
+          data: [
+            { id: "ses_a", title: "First", time: { updated: 2 } },
+            { id: "ses_b", title: "Second", time: { updated: 3 } },
+          ],
+          error: undefined,
+        })),
+      },
+    });
+
+    const initial = {
+      active: { "1": "ses_a" },
+      known: ["ses_a", "ses_b"],
+      verbose: [],
+    };
+    writeFileSync(sessionsFilePath, JSON.stringify(initial));
+
+    await startTelegram({
+      url: "http://localhost:4096",
+      launch: false,
+      client,
+      botFactory: () => bot as any,
+      sessionsFilePath,
+    });
+
+    await dispatchText("/sessions");
+    const lastMessage = sentMessages.at(-1);
+    const keyboard = (lastMessage?.options as any)?.reply_markup?.inline_keyboard;
+    expect(Array.isArray(keyboard)).toBe(true);
+    expect(keyboard.length).toBe(1);
+    expect(keyboard[0][0].callback_data).toBe("switch:ses_b");
+    expect(keyboard[0][1].callback_data).toBe("delete:ses_b");
+  });
+
+  it("shows only-session message without buttons", async () => {
+    const sessionsFilePath = createTempSessionsFile();
+    const { bot, dispatchText, sentMessages } = createMockBot();
+
+    const client = createMockClient({
+      session: {
+        list: vi.fn(async () => ({
+          data: [{ id: "ses_a", title: "Only", time: { updated: 2 } }],
+          error: undefined,
+        })),
+      },
+    });
+
+    const initial = {
+      active: { "1": "ses_a" },
+      known: ["ses_a"],
+      verbose: [],
+    };
+    writeFileSync(sessionsFilePath, JSON.stringify(initial));
+
+    await startTelegram({
+      url: "http://localhost:4096",
+      launch: false,
+      client,
+      botFactory: () => bot as any,
+      sessionsFilePath,
+    });
+
+    await dispatchText("/sessions");
+    const lastMessage = sentMessages.at(-1);
+    expect(lastMessage?.text).toContain("Current session: Only");
+    expect(lastMessage?.text).toContain("only session");
+    const keyboard = (lastMessage?.options as any)?.reply_markup?.inline_keyboard;
+    expect(keyboard).toBeUndefined();
+  });
+
+  it("switches sessions via inline button", async () => {
+    const sessionsFilePath = createTempSessionsFile();
+    const { bot, dispatchText, dispatchCallbackQuery, editedMessages } = createMockBot();
+
+    const client = createMockClient({
+      session: {
+        list: vi.fn(async () => ({
+          data: [
+            { id: "ses_a", title: "First", time: { updated: 2 } },
+            { id: "ses_b", title: "Second", time: { updated: 3 } },
+          ],
+          error: undefined,
+        })),
+      },
+    });
+
+    const initial = {
+      active: { "1": "ses_a" },
+      known: ["ses_a", "ses_b"],
+      verbose: [],
+    };
+    writeFileSync(sessionsFilePath, JSON.stringify(initial));
+
+    await startTelegram({
+      url: "http://localhost:4096",
+      launch: false,
+      client,
+      botFactory: () => bot as any,
+      sessionsFilePath,
+    });
+
+    await dispatchText("/sessions");
+    await dispatchCallbackQuery({ data: "switch:ses_b" });
+
+    const data = JSON.parse(readFileSync(sessionsFilePath, "utf-8"));
+    expect(data.active["1"]).toBe("ses_b");
+    expect(editedMessages.at(-1)?.text).toContain("Switched to session: Second");
+  });
+
+  it("deletes sessions via inline button", async () => {
+    const sessionsFilePath = createTempSessionsFile();
+    const { bot, dispatchText, dispatchCallbackQuery, editedMessages } = createMockBot();
+
+    const deleteMock = vi.fn(async () => ({ data: {}, error: undefined }));
+    const client = createMockClient({
+      session: {
+        list: vi.fn(async () => ({
+          data: [
+            { id: "ses_a", title: "First", time: { updated: 2 } },
+            { id: "ses_b", title: "Second", time: { updated: 3 } },
+          ],
+          error: undefined,
+        })),
+        delete: deleteMock,
+      },
+    });
+
+    const initial = {
+      active: { "1": "ses_a" },
+      known: ["ses_a", "ses_b"],
+      verbose: [],
+    };
+    writeFileSync(sessionsFilePath, JSON.stringify(initial));
+
+    await startTelegram({
+      url: "http://localhost:4096",
+      launch: false,
+      client,
+      botFactory: () => bot as any,
+      sessionsFilePath,
+    });
+
+    await dispatchText("/sessions");
+    await dispatchCallbackQuery({ data: "delete:ses_b" });
+
+    const data = JSON.parse(readFileSync(sessionsFilePath, "utf-8"));
+    expect(data.known).toEqual(["ses_a"]);
+    expect(deleteMock).toHaveBeenCalled();
+    expect(editedMessages.at(-1)?.text).toContain("Deleted session: Second");
   });
 
   it("renames sessions with /title", async () => {
@@ -634,7 +876,7 @@ describe("Telegram bot", () => {
       sessionsFilePath,
     });
 
-    await dispatchText("/delete 1");
+    await dispatchText("/delete ses_a");
     expect(sentMessages.map((m) => m.text).join("\n")).toContain("Cannot delete the active session");
   });
 

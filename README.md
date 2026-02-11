@@ -99,17 +99,14 @@ These are handled directly by the Telegram bot:
 |---|---|
 | `/start` | Welcome message |
 | `/new` | Start a new conversation |
-| `/sessions` | List all sessions with their IDs |
-| `/switch <id>` | Switch to a different session (prefix match supported) |
+| `/sessions` | List sessions with inline buttons |
 | `/title <text>` | Rename the current session |
-| `/delete <id>` | Delete a session from the server |
 | `/export` | Export the current session as a markdown file |
 | `/export full` | Export with all details (thinking, costs, steps) |
 | `/verbose` | Toggle verbose mode (show thinking and tool calls in chat) |
 | `/verbose on\|off` | Explicitly enable/disable verbose mode |
 | `/model` | Show current model and usage hints |
 | `/model <keyword>` | Search models by keyword |
-| `/model <number>` | Switch to a model from the last search |
 | `/model default` | Reset to the default model |
 | `/usage` | Show token and cost usage for this session |
 | `/help` | Show available commands |
@@ -141,13 +138,11 @@ Use `/model` to search and switch models without typing long names:
 ```
 You:  /model sonnet
 Bot:  Models matching "sonnet":
-      1. claude-sonnet-4-5 (google-vertex-anthropic)
-      2. claude-sonnet-4 (anthropic)
+      Tap a model to select.
 
-      Use /model <number> to select.
-
-You:  /model 1
+You:  [tap "claude-sonnet-4-5 (google-vertex-anthropic)"]
 Bot:  Switched to claude-sonnet-4-5 (google-vertex-anthropic)
+
 ```
 
 Other commands:
@@ -219,9 +214,8 @@ Bot:  [agent response about tests - new session auto-titled "Fix the broken test
 
 You:  /sessions
 Bot:  Your sessions:
-       [active] Fix the broken tests - 2 min ago (abc12345)
-       Auth refactoring - 1 hour ago (def67890)
-      Use /switch <id> to switch sessions.
+      Current session: Fix the broken tests
+      Tap a session to switch or delete.
 
 You:  /switch def6
 Bot:  Switched to session: Auth refactoring (def67890)

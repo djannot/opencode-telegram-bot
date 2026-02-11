@@ -47,7 +47,7 @@ Unit tests (`tests/app.test.ts`) cover:
 - Streaming responses in verbose mode (thinking + tool call summaries + final text)
 - Streaming responses in non-verbose mode (final text only)
 - Session export (`/export`) writes markdown and sends a document
-- Session listing and switching by index
+- Session listing and switching by inline buttons
 - Session renaming via `/title`
 - Preventing deletion of the active session
 - Forwarding OpenCode commands (e.g. `/review`)
