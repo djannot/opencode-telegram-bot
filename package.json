@@ -1,14 +1,28 @@
 {
-  "name": "opencode-telegram",
+  "name": "opencode-telegram-bot",
   "version": "1.0.0",
   "type": "module",
   "description": "Telegram bot that forwards messages to an OpenCode agent",
+  "main": "./dist/index.js",
+  "bin": {
+    "opencode-telegram-bot": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "start": "tsx src/index.ts",
     "serve": "opencode serve",
-    "build": "ncc build src/index.ts --out dist"
+    "build": "ncc build src/index.ts --out dist",
+    "prepublishOnly": "npm run build"
   },
-  "keywords": [],
+  "keywords": [
+    "opencode",
+    "telegram",
+    "bot",
+    "ai",
+    "agent"
+  ],
   "author": "",
   "license": "ISC",
   "dependencies": {

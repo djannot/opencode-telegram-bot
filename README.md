@@ -46,19 +46,28 @@ You need two processes running: the OpenCode server and the Telegram bot.
 **Terminal 1** -- Start the OpenCode server:
 
 ```bash
-npm run serve
+opencode serve
 ```
 
-This runs `opencode serve` on port 4096. You can pass flags through npm:
+This runs `opencode serve` on port 4096. You can pass additional flags:
 
 ```bash
-npm run serve -- --port 8080
+opencode serve --port 8080
 ```
 
 **Terminal 2** -- Start the Telegram bot:
 
+The quickest way is with `npx` (no install required):
+
 ```bash
-npm start
+npx opencode-telegram-bot
+```
+
+Or install it globally:
+
+```bash
+npm install -g opencode-telegram-bot
+opencode-telegram-bot
 ```
 
 The bot connects to `http://localhost:4096` by default.
@@ -74,10 +83,10 @@ Examples:
 
 ```bash
 # Connect to a custom server URL
-npm start -- --url http://192.168.1.100:4096
+npx opencode-telegram-bot --url http://192.168.1.100:4096
 
 # Use a specific model
-npm start -- --model anthropic/claude-sonnet-4-20250514
+npx opencode-telegram-bot --model anthropic/claude-sonnet-4-20250514
 ```
 
 ## Commands
