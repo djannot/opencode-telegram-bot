@@ -111,6 +111,8 @@ These are handled directly by the Telegram bot:
 | `/usage` | Show token and cost usage for this session |
 | `/help` | Show available commands |
 
+The bot also registers these commands in Telegram's command menu (the `/` button), plus any OpenCode server commands discovered at startup (excluding hidden ones like `/init` and `/review`).
+
 ### Verbose Mode
 
 By default, the bot only shows the assistant's final text response. Use `/verbose` to toggle verbose mode (or `/verbose on|off` to set it explicitly), which also displays:
@@ -217,17 +219,14 @@ Bot:  Your sessions:
       Current session: Fix the broken tests
       Tap a session to switch or delete.
 
-You:  /switch def6
-Bot:  Switched to session: Auth refactoring (def67890)
-
 You:  What were we working on?
 Bot:  [agent responds with context from the auth refactoring session]
 
-You:  /delete abc1
-Bot:  Deleted session: Fix the broken tests (abc12345)
+You:  [tap "Auth refactoring"]
+Bot:  Switched to session: Auth refactoring
 ```
 
-The `/sessions` list only shows sessions created by the Telegram bot, not sessions from other OpenCode clients (like the TUI). You cannot delete the currently active session -- use `/new` or `/switch` first.
+The `/sessions` list only shows sessions created by the Telegram bot, not sessions from other OpenCode clients (like the TUI). You cannot delete the currently active session -- use `/new` first.
 
 ## Session Persistence
 

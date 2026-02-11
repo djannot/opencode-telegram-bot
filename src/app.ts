@@ -61,6 +61,7 @@ interface TelegramBot {
     deleteMessage: (chatId: number, messageId: number) => Promise<void>;
     sendDocument: (chatId: number, file: { source: Buffer; filename: string }) => Promise<void>;
     getFileLink: (fileId: string) => Promise<{ toString(): string }>;
+    setMyCommands: (commands: Array<{ command: string; description: string }>) => Promise<unknown>;
   };
 }
 
@@ -96,6 +97,10 @@ export async function startTelegram(options: StartOptions) {
 
   // Verify connection to the OpenCode server and fetch available commands
   const opencodeCommands = new Set<string>();
+  const opencodeCommandMenu: Array<{ command: string; description: string }> = [];
+  const hiddenOpenCodeCommands = new Set(["init", "review", "reviews"]);
+  const isHiddenOpenCodeCommand = (name: string) =>
+    hiddenOpenCodeCommands.has(name.toLowerCase());
   let projectDirectory = "";
   try {
     const sessions = await client.session.list();
@@ -115,7 +120,15 @@ export async function startTelegram(options: StartOptions) {
     const cmds = await client.command.list();
     if (cmds.data) {
       for (const cmd of cmds.data) {
-        opencodeCommands.add(cmd.name);
+        const name = cmd.name;
+        if (!name) continue;
+        opencodeCommands.add(name);
+        if (!isHiddenOpenCodeCommand(name)) {
+          opencodeCommandMenu.push({
+            command: name,
+            description: cmd.description || "OpenCode command",
+          });
+        }
       }
       console.log(
         `[Telegram] Available OpenCode commands: ${[...opencodeCommands].join(", ")}`
@@ -131,6 +144,20 @@ export async function startTelegram(options: StartOptions) {
   const telegramCommands = new Set([
     "start", "help", "new", "sessions", "switch", "title", "delete", "export", "verbose", "model", "usage",
   ]);
+
+  const telegramCommandMenu: Array<{ command: string; description: string }> = [
+    { command: "new", description: "Start a new conversation" },
+    { command: "sessions", description: "List your sessions" },
+    { command: "title", description: "Rename a session (/title <text>)" },
+    { command: "export", description: "Export session (/export full for details)" },
+    { command: "verbose", description: "Toggle verbose mode" },
+    { command: "model", description: "Search models (/model <keyword>)" },
+    { command: "usage", description: "Show token and cost usage" },
+    { command: "help", description: "Show available commands" },
+  ];
+
+  const getVisibleOpenCodeCommands = () =>
+    [...opencodeCommands].filter((command) => !isHiddenOpenCodeCommand(command));
 
   // Map of chatId -> sessionId for the active session per chat
   const chatSessions = new Map<string, string>();
@@ -747,6 +774,24 @@ export async function startTelegram(options: StartOptions) {
     ? options.botFactory(token)
     : (new Telegraf(token) as unknown as TelegramBot);
 
+  async function registerCommandMenu() {
+    const combined = [...telegramCommandMenu, ...opencodeCommandMenu];
+    const seen = new Set<string>();
+    const commands: Array<{ command: string; description: string }> = [];
+    for (const entry of combined) {
+      if (!entry.command || seen.has(entry.command)) continue;
+      seen.add(entry.command);
+      commands.push(entry);
+    }
+
+    if (commands.length === 0) return;
+    try {
+      await bot.telegram.setMyCommands(commands);
+    } catch (err) {
+      console.warn("[Telegram] Failed to register command menu:", err);
+    }
+  }
+
   // Middleware to check if the user is authorized
   bot.use((ctx, next) => {
     if (!authorizedUserId) {
@@ -765,26 +810,29 @@ export async function startTelegram(options: StartOptions) {
     }
   });
 
+  await registerCommandMenu();
+
   // Handle /start command
   bot.start((ctx) => {
     let msg =
       "Hello! I'm your OpenCode bot. Send me a message and I'll forward it to the OpenCode agent.\n\n" +
       "Bot commands:\n" +
       "/new - Start a new conversation\n" +
-      "/sessions - List your sessions\n" +
+      "/sessions - List your sessions (buttons)\n" +
       "/title <text> - Rename the current session\n" +
       "/export - Export the current session as a markdown file\n" +
       "/export full - Export with all details (thinking, costs, steps)\n" +
       "/verbose - Toggle verbose mode (show thinking and tool calls)\n" +
       "/verbose on|off - Set verbose mode explicitly\n" +
-      "/model - Show or search available models\n" +
+      "/model <keyword> - Search available models\n" +
       "/usage - Show token and cost usage for this session\n" +
       "/help - Show this help message\n";
 
-    if (opencodeCommands.size > 0) {
+    const visibleOpenCodeCommands = getVisibleOpenCodeCommands();
+    if (visibleOpenCodeCommands.length > 0) {
       msg +=
         "\nOpenCode commands are also available:\n" +
-        [...opencodeCommands].map((c) => `/${c}`).join(", ");
+        visibleOpenCodeCommands.map((c) => `/${c}`).join(", ");
     }
 
     ctx.reply(msg);
@@ -796,20 +844,21 @@ export async function startTelegram(options: StartOptions) {
       "Send me any message and I'll process it using OpenCode.\n\n" +
       "Bot commands:\n" +
       "/new - Start a new conversation\n" +
-      "/sessions - List your sessions\n" +
+      "/sessions - List your sessions (buttons)\n" +
       "/title <text> - Rename the current session\n" +
       "/export - Export the current session as a markdown file\n" +
       "/export full - Export with all details (thinking, costs, steps)\n" +
       "/verbose - Toggle verbose mode (show thinking and tool calls)\n" +
       "/verbose on|off - Set verbose mode explicitly\n" +
-      "/model - Show or search available models\n" +
+      "/model <keyword> - Search available models\n" +
       "/usage - Show token and cost usage for this session\n" +
       "/help - Show this help message\n";
 
-    if (opencodeCommands.size > 0) {
+    const visibleOpenCodeCommands = getVisibleOpenCodeCommands();
+    if (visibleOpenCodeCommands.length > 0) {
       msg +=
         "\nOpenCode commands:\n" +
-        [...opencodeCommands].map((c) => `/${c}`).join(", ");
+        visibleOpenCodeCommands.map((c) => `/${c}`).join(", ");
     }
 
     ctx.reply(msg);
@@ -1639,7 +1688,9 @@ export async function startTelegram(options: StartOptions) {
 
       // Check if it's a known OpenCode command
       if (!opencodeCommands.has(commandName)) {
-        const available = [...opencodeCommands].map((c) => `/${c}`).join(", ");
+        const available = getVisibleOpenCodeCommands()
+          .map((c) => `/${c}`)
+          .join(", ");
         await ctx.reply(
           `Unknown command: /${commandName}\n\n` +
             `Available OpenCode commands: ${available || "none"}\n` +

@@ -32,6 +32,7 @@ export function createMockBot() {
       });
     }),
     getFileLink: vi.fn(async (fileId: string) => new URL(`https://files.test/${fileId}`)),
+    setMyCommands: vi.fn(async () => true),
   };
 
   const bot = {

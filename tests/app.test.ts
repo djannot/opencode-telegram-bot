@@ -16,6 +16,48 @@ describe("Telegram bot", () => {
     process.env.AUTHORIZED_TELEGRAM_USER_ID = "1";
   });
 
+  it("registers Telegram command menu with OpenCode commands", async () => {
+    const sessionsFilePath = createTempSessionsFile();
+    const { bot, telegram } = createMockBot();
+    const client = createMockClient({
+      command: {
+        list: vi.fn(async () => ({
+          data: [
+            { name: "review", description: "Review code" },
+            { name: "reviews" },
+            { name: "init" },
+            { name: "plan", description: "Plan work" },
+          ],
+          error: undefined,
+        })),
+      },
+    });
+
+    await startTelegram({
+      url: "http://localhost:4096",
+      launch: false,
+      client,
+      botFactory: () => bot as any,
+      sessionsFilePath,
+    });
+
+    expect(telegram.setMyCommands).toHaveBeenCalled();
+    const commands = (telegram.setMyCommands as any).mock.calls[0][0];
+    expect(commands).toEqual(
+      expect.arrayContaining([
+        { command: "sessions", description: "List your sessions" },
+        { command: "plan", description: "Plan work" },
+      ])
+    );
+    expect(commands).not.toEqual(
+      expect.arrayContaining([
+        { command: "review", description: "Review code" },
+        { command: "reviews", description: "OpenCode command" },
+        { command: "init", description: "OpenCode command" },
+      ])
+    );
+  });
+
   it("toggles verbose on/off and persists", async () => {
     const sessionsFilePath = createTempSessionsFile();
     const { bot, dispatchText } = createMockBot();
