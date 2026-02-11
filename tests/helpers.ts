@@ -7,7 +7,7 @@ export function createMockBot() {
   const commands = new Map<string, (ctx: any) => Promise<void> | void>();
   let startHandler: ((ctx: any) => Promise<void> | void) | null = null;
   let helpHandler: ((ctx: any) => Promise<void> | void) | null = null;
-  let textHandler: ((ctx: any) => Promise<void> | void) | null = null;
+  const eventHandlers = new Map<string, (ctx: any) => Promise<void> | void>();
 
   const sentMessages: Array<{ chatId: number; text: string; options?: Record<string, unknown> }> = [];
   const deletedMessages: Array<{ chatId: number; messageId: number }> = [];
@@ -29,6 +29,7 @@ export function createMockBot() {
         content: file.source.toString("utf-8"),
       });
     }),
+    getFileLink: vi.fn(async (fileId: string) => new URL(`https://files.test/${fileId}`)),
   };
 
   const bot = {
@@ -45,14 +46,24 @@ export function createMockBot() {
       commands.set(command, fn);
     },
     on(event: string, fn: (ctx: any) => Promise<void> | void) {
-      if (event === "text") {
-        textHandler = fn;
-      }
+      eventHandlers.set(event, fn);
     },
     launch: vi.fn(async () => {}),
     stop: vi.fn(() => {}),
     telegram,
   };
+
+  async function dispatchWithContext(ctx: any, handler: (ctx: any) => Promise<void> | void) {
+    async function runMiddlewares(index: number): Promise<void> {
+      if (index < middlewares.length) {
+        await middlewares[index](ctx, () => runMiddlewares(index + 1));
+      } else {
+        await handler(ctx);
+      }
+    }
+
+    await runMiddlewares(0);
+  }
 
   async function dispatchText(text: string, chatId = 1, userId = 1) {
     const ctx = {
@@ -63,7 +74,6 @@ export function createMockBot() {
         return telegram.sendMessage(chatId, replyText);
       },
     };
-
     const commandMatch = text.match(/^\/(\w+)/);
     const command = commandMatch ? commandMatch[1] : null;
 
@@ -72,21 +82,69 @@ export function createMockBot() {
         ? startHandler
         : command === "help"
           ? helpHandler
-          : commands.get(command) || textHandler
-      : textHandler;
+          : commands.get(command) || eventHandlers.get("text")
+      : eventHandlers.get("text");
 
     if (!handler) return;
-    const activeHandler = handler;
+    await dispatchWithContext(ctx, handler);
+  }
 
-    async function runMiddlewares(index: number): Promise<void> {
-      if (index < middlewares.length) {
-        await middlewares[index](ctx, () => runMiddlewares(index + 1));
-      } else {
-        await activeHandler(ctx);
-      }
-    }
+  async function dispatchDocument(params: {
+    fileId: string;
+    mimeType?: string;
+    fileName?: string;
+    caption?: string;
+    chatId?: number;
+    userId?: number;
+  }) {
+    const chatId = params.chatId ?? 1;
+    const userId = params.userId ?? 1;
+    const ctx = {
+      chat: { id: chatId },
+      message: {
+        document: {
+          file_id: params.fileId,
+          mime_type: params.mimeType,
+          file_name: params.fileName,
+        },
+        caption: params.caption,
+        from: { id: userId },
+      },
+      from: { id: userId },
+      reply: async (replyText: string) => {
+        return telegram.sendMessage(chatId, replyText);
+      },
+    };
 
-    await runMiddlewares(0);
+    const handler = eventHandlers.get("document");
+    if (!handler) return;
+    await dispatchWithContext(ctx, handler);
+  }
+
+  async function dispatchPhoto(params: {
+    fileId: string;
+    caption?: string;
+    chatId?: number;
+    userId?: number;
+  }) {
+    const chatId = params.chatId ?? 1;
+    const userId = params.userId ?? 1;
+    const ctx = {
+      chat: { id: chatId },
+      message: {
+        photo: [{ file_id: params.fileId }],
+        caption: params.caption,
+        from: { id: userId },
+      },
+      from: { id: userId },
+      reply: async (replyText: string) => {
+        return telegram.sendMessage(chatId, replyText);
+      },
+    };
+
+    const handler = eventHandlers.get("photo");
+    if (!handler) return;
+    await dispatchWithContext(ctx, handler);
   }
 
   return {
@@ -96,6 +154,8 @@ export function createMockBot() {
     deletedMessages,
     sentDocuments,
     dispatchText,
+    dispatchDocument,
+    dispatchPhoto,
   };
 }
 

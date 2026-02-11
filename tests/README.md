@@ -54,6 +54,8 @@ Unit tests (`tests/app.test.ts`) cover:
 - `/start` and `/help` output includes verbose commands
 - Model search and switching with `/model`
 - Session usage reporting with `/usage`
+- File uploads forwarded as file parts
+- Text file uploads are inlined as text parts
 
 Integration test (`tests/integration.test.ts`) covers:
 

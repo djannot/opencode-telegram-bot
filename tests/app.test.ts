@@ -340,6 +340,163 @@ describe("Telegram bot", () => {
     expect(text).toContain("Cost: $0.0100");
   });
 
+  it("forwards document uploads as file parts", async () => {
+    const sessionsFilePath = createTempSessionsFile();
+    const { bot, dispatchDocument } = createMockBot();
+
+    const promptAsync = vi.fn(async () => ({ data: undefined, error: undefined }));
+    const client = createMockClient({
+      session: {
+        create: vi.fn(async () => ({ data: { id: "ses_test" }, error: undefined })),
+        update: vi.fn(async () => ({ data: {}, error: undefined })),
+        promptAsync,
+      },
+      event: {
+        subscribe: vi.fn(async () => ({
+          stream: streamFrom([
+            {
+              type: "message.part.updated",
+              properties: { part: { type: "text", id: "prt_txt", sessionID: "ses_test", text: "Ok" } },
+            },
+            { type: "session.idle", properties: { sessionID: "ses_test" } },
+          ]),
+        })),
+      },
+    });
+
+    await startTelegram({
+      url: "http://localhost:4096",
+      launch: false,
+      client,
+      botFactory: () => bot as any,
+      sessionsFilePath,
+    });
+
+    await dispatchDocument({
+      fileId: "file_123",
+      mimeType: "application/pdf",
+      fileName: "test.pdf",
+      caption: "Please summarize",
+    });
+
+    const call = (promptAsync as any).mock.calls.at(-1)?.[0];
+    const parts = call?.body?.parts || [];
+    expect(parts).toEqual([
+      { type: "text", text: "Please summarize" },
+      {
+        type: "file",
+        mime: "application/pdf",
+        filename: "test.pdf",
+        url: "https://files.test/file_123",
+      },
+    ]);
+  });
+
+  it("forwards photo uploads as file parts", async () => {
+    const sessionsFilePath = createTempSessionsFile();
+    const { bot, dispatchPhoto } = createMockBot();
+
+    const promptAsync = vi.fn(async () => ({ data: undefined, error: undefined }));
+    const client = createMockClient({
+      session: {
+        create: vi.fn(async () => ({ data: { id: "ses_test" }, error: undefined })),
+        update: vi.fn(async () => ({ data: {}, error: undefined })),
+        promptAsync,
+      },
+      event: {
+        subscribe: vi.fn(async () => ({
+          stream: streamFrom([
+            {
+              type: "message.part.updated",
+              properties: { part: { type: "text", id: "prt_txt", sessionID: "ses_test", text: "Ok" } },
+            },
+            { type: "session.idle", properties: { sessionID: "ses_test" } },
+          ]),
+        })),
+      },
+    });
+
+    await startTelegram({
+      url: "http://localhost:4096",
+      launch: false,
+      client,
+      botFactory: () => bot as any,
+      sessionsFilePath,
+    });
+
+    await dispatchPhoto({
+      fileId: "file_photo",
+    });
+
+    const call = (promptAsync as any).mock.calls.at(-1)?.[0];
+    const parts = call?.body?.parts || [];
+    expect(parts).toEqual([
+      {
+        type: "file",
+        mime: "image/jpeg",
+        filename: "photo.jpg",
+        url: "https://files.test/file_photo",
+      },
+    ]);
+  });
+
+  it("inlines text files as text parts", async () => {
+    const sessionsFilePath = createTempSessionsFile();
+    const { bot, dispatchDocument } = createMockBot();
+
+    const promptAsync = vi.fn(async () => ({ data: undefined, error: undefined }));
+    const client = createMockClient({
+      session: {
+        create: vi.fn(async () => ({ data: { id: "ses_test" }, error: undefined })),
+        update: vi.fn(async () => ({ data: {}, error: undefined })),
+        promptAsync,
+      },
+      event: {
+        subscribe: vi.fn(async () => ({
+          stream: streamFrom([
+            {
+              type: "message.part.updated",
+              properties: { part: { type: "text", id: "prt_txt", sessionID: "ses_test", text: "Ok" } },
+            },
+            { type: "session.idle", properties: { sessionID: "ses_test" } },
+          ]),
+        })),
+      },
+    });
+
+    const fetchMock = vi.fn(async () =>
+      new Response("# Title\n\nContent", {
+        status: 200,
+        headers: { "content-length": "20" },
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await startTelegram({
+      url: "http://localhost:4096",
+      launch: false,
+      client,
+      botFactory: () => bot as any,
+      sessionsFilePath,
+    });
+
+    await dispatchDocument({
+      fileId: "file_456",
+      mimeType: "text/x-markdown",
+      fileName: "notes.md",
+      caption: "Summarize",
+    });
+
+    const call = (promptAsync as any).mock.calls.at(-1)?.[0];
+    const parts = call?.body?.parts || [];
+    expect(parts[0]).toEqual({ type: "text", text: "Summarize" });
+    expect(parts[1].type).toBe("text");
+    expect(parts[1].text).toContain("File: notes.md");
+    expect(parts[1].text).toContain("# Title");
+
+    vi.unstubAllGlobals();
+  });
+
   it("exports session markdown and sends a document", async () => {
     const sessionsFilePath = createTempSessionsFile();
     const exportDir = mkdtempSync(join(tmpdir(), "opencode-export-"));

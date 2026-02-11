@@ -34,6 +34,10 @@ interface OpencodeClientLike {
   };
 }
 
+type PromptPartInput =
+  | { type: "text"; text: string }
+  | { type: "file"; mime: string; filename?: string; url: string };
+
 interface StartOptions {
   url: string;
   model?: string;
@@ -55,6 +59,7 @@ interface TelegramBot {
     sendMessage: (chatId: number, text: string, options?: Record<string, unknown>) => Promise<void>;
     deleteMessage: (chatId: number, messageId: number) => Promise<void>;
     sendDocument: (chatId: number, file: { source: Buffer; filename: string }) => Promise<void>;
+    getFileLink: (fileId: string) => Promise<{ toString(): string }>;
   };
 }
 
@@ -333,6 +338,59 @@ export async function startTelegram(options: StartOptions) {
     }
   }
 
+  function buildPromptBody(chatId: string, parts: PromptPartInput[]) {
+    const promptBody: {
+      parts: PromptPartInput[];
+      model?: { providerID: string; modelID: string };
+    } = { parts };
+
+    const modelOverride = chatModelOverride.get(chatId) || model;
+    if (modelOverride) {
+      const [providerID, ...modelParts] = modelOverride.split("/");
+      const modelID = modelParts.join("/");
+      promptBody.model = { providerID, modelID };
+    }
+
+    return promptBody;
+  }
+
+  async function getTelegramFileUrl(fileId: string): Promise<string> {
+    const link = await bot.telegram.getFileLink(fileId);
+    return link.toString();
+  }
+
+  function isTextMime(mime: string) {
+    const normalized = mime.toLowerCase();
+    return (
+      normalized.startsWith("text/") ||
+      normalized === "application/json" ||
+      normalized === "application/xml" ||
+      normalized === "application/yaml" ||
+      normalized === "application/x-yaml" ||
+      normalized === "application/markdown"
+    );
+  }
+
+  async function fetchTelegramFileText(fileId: string, maxBytes = 200_000) {
+    const url = await getTelegramFileUrl(fileId);
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch file: ${response.status}`);
+    }
+
+    const contentLength = response.headers.get("content-length");
+    if (contentLength && Number(contentLength) > maxBytes) {
+      throw new Error("File is too large to send as text.");
+    }
+
+    const buffer = await response.arrayBuffer();
+    if (buffer.byteLength > maxBytes) {
+      throw new Error("File is too large to send as text.");
+    }
+
+    return new TextDecoder("utf-8").decode(buffer);
+  }
+
   /**
    * Build a one-line summary for a tool call, picking the most meaningful input field.
    */
@@ -429,7 +487,7 @@ export async function startTelegram(options: StartOptions) {
     chatId: number,
     sessionId: string,
     promptBody: {
-      parts: Array<{ type: "text"; text: string }>;
+      parts: PromptPartInput[];
       model?: { providerID: string; modelID: string };
     },
     processingMsgId: number,
@@ -583,6 +641,59 @@ export async function startTelegram(options: StartOptions) {
     const chunks = splitMessage(finalText, 4096);
     for (const chunk of chunks) {
       await sendTelegramMessage(chatId, chunk);
+    }
+  }
+
+  async function handleFileMessage(
+    ctx: any,
+    fileId: string,
+    mime: string,
+    filename?: string,
+    caption?: string
+  ) {
+    const chatId = ctx.chat.id.toString();
+
+    try {
+      const processingMsg = await ctx.reply("Processing your request...");
+      const sessionId = await getOrCreateSession(chatId);
+
+      const titleText = caption || filename || "File upload";
+      await autoTitleSession(sessionId, titleText);
+
+      const parts: PromptPartInput[] = [];
+      if (caption) {
+        parts.push({ type: "text", text: caption });
+      }
+
+      const normalizedMime = mime.toLowerCase();
+      if (isTextMime(normalizedMime)) {
+        const textContent = await fetchTelegramFileText(fileId);
+        const header = filename ? `File: ${filename}` : "File";
+        parts.push({
+          type: "text",
+          text: `${header}\n\n${textContent}`,
+        });
+      } else {
+        const url = await getTelegramFileUrl(fileId);
+        parts.push({ type: "file", mime: normalizedMime, filename, url });
+      }
+
+      const promptBody = buildPromptBody(chatId, parts);
+      const verbose = chatVerboseMode.has(chatId);
+
+      await sendPromptStreaming(
+        ctx.chat.id,
+        sessionId,
+        promptBody,
+        processingMsg.message_id,
+        verbose
+      );
+    } catch (err) {
+      console.error("[Telegram] Error processing file message:", err);
+      await handleSessionError(chatId);
+      await ctx.reply(
+        "Sorry, there was an error processing your request. Try again or use /new to start a fresh session."
+      );
     }
   }
 
@@ -1085,6 +1196,35 @@ export async function startTelegram(options: StartOptions) {
     }
   });
 
+  // Handle photo messages (images)
+  bot.on("photo", async (ctx) => {
+    const photos = ctx.message.photo;
+    if (!photos || photos.length === 0) return;
+    const largest = photos[photos.length - 1];
+    const caption = ctx.message.caption;
+    await handleFileMessage(
+      ctx,
+      largest.file_id,
+      "image/jpeg",
+      "photo.jpg",
+      caption
+    );
+  });
+
+  // Handle document messages (files)
+  bot.on("document", async (ctx) => {
+    const doc = ctx.message.document;
+    if (!doc) return;
+    const caption = ctx.message.caption;
+    await handleFileMessage(
+      ctx,
+      doc.file_id,
+      doc.mime_type || "application/octet-stream",
+      doc.file_name,
+      caption
+    );
+  });
+
   /**
    * Render a message part to markdown.
    * In default mode: only text and tool calls (name + input/output).
@@ -1436,19 +1576,9 @@ export async function startTelegram(options: StartOptions) {
       // Auto-title if this is the first message in a new session
       await autoTitleSession(sessionId, userText);
 
-      // Build the prompt body
-      const promptBody: {
-        parts: Array<{ type: "text"; text: string }>;
-        model?: { providerID: string; modelID: string };
-      } = {
-        parts: [{ type: "text", text: userText }],
-      };
-      const modelOverride = chatModelOverride.get(chatId) || model;
-      if (modelOverride) {
-        const [providerID, ...modelParts] = modelOverride.split("/");
-        const modelID = modelParts.join("/");
-        promptBody.model = { providerID, modelID };
-      }
+      const promptBody = buildPromptBody(chatId, [
+        { type: "text", text: userText },
+      ]);
 
       const verbose = chatVerboseMode.has(chatId);
 

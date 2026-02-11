@@ -190,6 +190,13 @@ If you type an unknown command, the bot will reply with the list of available co
 
 Any other text message is forwarded to the OpenCode agent as a prompt. Follow-up messages go into the same session, so the agent has full conversation context. Use `/new` when you want a fresh conversation.
 
+### Files and Images
+
+You can send files or images to the bot. They are forwarded to OpenCode as file parts (with optional caption text). Text-based files (including markdown) are sent as text instead of file parts for better model compatibility. Supported types:
+
+- Photos sent via Telegram
+- Documents (PDFs, images, etc.)
+
 ## Session Management
 
 Sessions are never deleted automatically. You can have multiple sessions and switch between them.
