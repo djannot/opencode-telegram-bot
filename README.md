@@ -103,7 +103,20 @@ These are handled directly by the Telegram bot:
 | `/switch <id>` | Switch to a different session (prefix match supported) |
 | `/title <text>` | Rename the current session |
 | `/delete <id>` | Delete a session from the server |
+| `/export` | Export the current session as a markdown file |
+| `/export full` | Export with all details (thinking, costs, steps) |
 | `/help` | Show available commands |
+
+### Session Export
+
+The `/export` command builds a markdown file from the current session and saves it to the directory where OpenCode is running. The file is also sent back to you as a Telegram document.
+
+Two modes are available:
+
+- **`/export`** -- Default. Includes user messages, assistant text, and tool calls (name, input, output).
+- **`/export full`** (also accepts `detailed` or `all`) -- Includes everything from the default mode plus reasoning/thinking blocks, step boundaries with token counts, costs, subtasks, retries, and compaction markers.
+
+The exported file is named `session-<id>.md` (or `session-<id>-detailed.md` for the full export).
 
 ### OpenCode Commands
 

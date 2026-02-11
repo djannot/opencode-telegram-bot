@@ -69,7 +69,7 @@ export async function startTelegram(options: StartOptions) {
 
   // Telegram-only commands that should not be forwarded to OpenCode
   const telegramCommands = new Set([
-    "start", "help", "new", "sessions", "switch", "title", "delete",
+    "start", "help", "new", "sessions", "switch", "title", "delete", "export",
   ]);
 
   // Map of chatId -> sessionId for the active session per chat
@@ -344,6 +344,8 @@ export async function startTelegram(options: StartOptions) {
       "/switch <number> - Switch to a different session\n" +
       "/title <text> - Rename the current session\n" +
       "/delete <number> - Delete a session\n" +
+      "/export - Export the current session as a markdown file\n" +
+      "/export full - Export with all details (thinking, costs, steps)\n" +
       "/help - Show this help message\n";
 
     if (opencodeCommands.size > 0) {
@@ -365,6 +367,8 @@ export async function startTelegram(options: StartOptions) {
       "/switch <number> - Switch to a different session\n" +
       "/title <text> - Rename the current session\n" +
       "/delete <number> - Delete a session\n" +
+      "/export - Export the current session as a markdown file\n" +
+      "/export full - Export with all details (thinking, costs, steps)\n" +
       "/help - Show this help message\n";
 
     if (opencodeCommands.size > 0) {
@@ -573,6 +577,280 @@ export async function startTelegram(options: StartOptions) {
     }
   });
 
+  /**
+   * Render a message part to markdown.
+   * In default mode: only text and tool calls (name + input/output).
+   * In detailed mode: also includes reasoning, step info, subtasks, costs, etc.
+   */
+  function renderPart(
+    part: { type: string; [key: string]: unknown },
+    detailed: boolean
+  ): string {
+    let md = "";
+
+    switch (part.type) {
+      case "text": {
+        const text = part.text as string | undefined;
+        if (text) {
+          md += `${text}\n\n`;
+        }
+        break;
+      }
+
+      case "tool": {
+        const tool = part.tool as string;
+        const state = part.state as {
+          status: string;
+          input?: { [key: string]: unknown };
+          output?: string;
+          error?: string;
+          time?: { start: number; end: number };
+        };
+        md += `**Tool: ${tool}**\n\n`;
+        if (state.input) {
+          md += `**Input:**\n\`\`\`json\n${JSON.stringify(state.input, null, 2)}\n\`\`\`\n\n`;
+        }
+        if (state.output) {
+          md += `**Output:**\n\`\`\`\n${state.output}\n\`\`\`\n\n`;
+        }
+        if (state.error) {
+          md += `**Error:**\n\`\`\`\n${state.error}\n\`\`\`\n\n`;
+        }
+        if (detailed && state.time) {
+          const duration = ((state.time.end - state.time.start) / 1000).toFixed(1);
+          md += `*Status: ${state.status} (${duration}s)*\n\n`;
+        }
+        break;
+      }
+
+      case "reasoning": {
+        if (!detailed) break;
+        const text = part.text as string | undefined;
+        if (text) {
+          md += `<details>\n<summary>Thinking</summary>\n\n${text}\n\n</details>\n\n`;
+        }
+        break;
+      }
+
+      case "step-start": {
+        if (!detailed) break;
+        md += `---\n*Step started*\n\n`;
+        break;
+      }
+
+      case "step-finish": {
+        if (!detailed) break;
+        const reason = part.reason as string | undefined;
+        const cost = part.cost as number | undefined;
+        const tokens = part.tokens as {
+          input: number;
+          output: number;
+          reasoning: number;
+          cache: { read: number; write: number };
+        } | undefined;
+        let info = `*Step finished`;
+        if (reason) info += ` (${reason})`;
+        info += `*`;
+        if (tokens) {
+          info += `\n*Tokens: ${tokens.input} in / ${tokens.output} out`;
+          if (tokens.reasoning > 0) info += ` / ${tokens.reasoning} reasoning`;
+          if (tokens.cache.read > 0 || tokens.cache.write > 0) {
+            info += ` (cache: ${tokens.cache.read} read, ${tokens.cache.write} write)`;
+          }
+          info += `*`;
+        }
+        if (cost !== undefined && cost > 0) {
+          info += `\n*Cost: $${cost.toFixed(4)}*`;
+        }
+        md += `${info}\n\n---\n\n`;
+        break;
+      }
+
+      case "subtask": {
+        if (!detailed) break;
+        const description = part.description as string | undefined;
+        const agent = part.agent as string | undefined;
+        const prompt = part.prompt as string | undefined;
+        md += `**Subtask${agent ? ` (${agent})` : ""}**`;
+        if (description) md += `: ${description}`;
+        md += `\n\n`;
+        if (prompt) {
+          md += `> ${prompt.replace(/\n/g, "\n> ")}\n\n`;
+        }
+        break;
+      }
+
+      case "agent": {
+        if (!detailed) break;
+        const name = part.name as string | undefined;
+        if (name) {
+          md += `*Agent: ${name}*\n\n`;
+        }
+        break;
+      }
+
+      case "retry": {
+        if (!detailed) break;
+        const attempt = part.attempt as number | undefined;
+        const error = part.error as { data?: { message?: string } } | undefined;
+        md += `**Retry (attempt ${attempt || "?"})**`;
+        if (error?.data?.message) {
+          md += `\n\`\`\`\n${error.data.message}\n\`\`\``;
+        }
+        md += `\n\n`;
+        break;
+      }
+
+      case "compaction": {
+        if (!detailed) break;
+        const auto = part.auto as boolean | undefined;
+        md += `*Context compacted${auto ? " (auto)" : ""}*\n\n`;
+        break;
+      }
+
+      default:
+        // snapshot, patch, file, etc. - skip in both modes
+        break;
+    }
+
+    return md;
+  }
+
+  // Handle /export command - export the current session to the opencode project directory
+  // Usage: /export        - default (text + tool calls only)
+  //        /export full   - detailed (includes thinking, steps, costs, subtasks, etc.)
+  bot.command("export", async (ctx) => {
+    const chatId = ctx.chat.id.toString();
+    const sessionId = chatSessions.get(chatId);
+
+    if (!sessionId) {
+      await ctx.reply(
+        "No active session. Send a message first to create one."
+      );
+      return;
+    }
+
+    const args = ctx.message.text.replace(/^\/export\s*/, "").trim().toLowerCase();
+    const detailed = args === "full" || args === "detailed" || args === "all";
+
+    try {
+      const modeLabel = detailed ? "detailed" : "summary";
+      const processingMsg = await ctx.reply(`Exporting session (${modeLabel})...`);
+
+      // Fetch session info and messages in parallel
+      const [sessionResult, messagesResult, pathResult] = await Promise.all([
+        client.session.get({ path: { id: sessionId } }),
+        client.session.messages({ path: { id: sessionId } }),
+        client.path.get(),
+      ]);
+
+      if (sessionResult.error || !sessionResult.data) {
+        throw new Error(
+          `Failed to get session: ${JSON.stringify(sessionResult.error)}`
+        );
+      }
+      if (messagesResult.error || !messagesResult.data) {
+        throw new Error(
+          `Failed to get messages: ${JSON.stringify(messagesResult.error)}`
+        );
+      }
+
+      const session = sessionResult.data;
+      const messages = messagesResult.data;
+
+      // Build the markdown export
+      let md = `# ${session.title}\n\n`;
+      md += `**Session ID:** ${session.id}\n`;
+      md += `**Created:** ${new Date(session.time.created * 1000).toLocaleString()}\n`;
+      md += `**Updated:** ${new Date(session.time.updated * 1000).toLocaleString()}\n`;
+      if (detailed) {
+        md += `**Export mode:** Detailed\n`;
+      }
+      md += `\n---\n\n`;
+
+      for (const msg of messages) {
+        const info = msg.info;
+        const parts = msg.parts || [];
+
+        if (info.role === "user") {
+          md += `## User\n\n`;
+          for (const part of parts) {
+            md += renderPart(part as { type: string; [key: string]: unknown }, detailed);
+          }
+          md += `---\n\n`;
+        } else if (info.role === "assistant") {
+          const assistant = info as {
+            modelID: string;
+            providerID?: string;
+            mode?: string;
+            time: { created: number; completed?: number };
+            cost?: number;
+            tokens?: { input: number; output: number; reasoning: number; cache: { read: number; write: number } };
+          };
+          const duration = assistant.time.completed
+            ? ((assistant.time.completed - assistant.time.created) / 1000).toFixed(1) + "s"
+            : "";
+          const modelLabel = assistant.modelID || "unknown";
+          const modeLabel = assistant.mode || "";
+          const header = [modeLabel, modelLabel, duration].filter(Boolean).join(" · ");
+          md += `## Assistant (${header})\n\n`;
+
+          if (detailed && assistant.tokens) {
+            const t = assistant.tokens;
+            md += `*Tokens: ${t.input} in / ${t.output} out`;
+            if (t.reasoning > 0) md += ` / ${t.reasoning} reasoning`;
+            if (t.cache.read > 0 || t.cache.write > 0) {
+              md += ` (cache: ${t.cache.read} read, ${t.cache.write} write)`;
+            }
+            md += `*\n`;
+            if (assistant.cost && assistant.cost > 0) {
+              md += `*Cost: $${assistant.cost.toFixed(4)}*\n`;
+            }
+            md += `\n`;
+          }
+
+          for (const part of parts) {
+            md += renderPart(part as { type: string; [key: string]: unknown }, detailed);
+          }
+          md += `---\n\n`;
+        }
+      }
+
+      // Write to the project directory
+      const projectDir = pathResult.data?.directory;
+      const idPrefix = sessionId.substring(0, 8);
+      const suffix = detailed ? "-detailed" : "";
+      const filename = `session-${idPrefix}${suffix}.md`;
+      const exportPath = resolve(projectDir || ".", filename);
+
+      writeFileSync(exportPath, md, "utf-8");
+      console.log(
+        `[Telegram] Exported session ${sessionId} to ${exportPath} (${detailed ? "detailed" : "summary"})`
+      );
+
+      // Delete the processing message
+      try {
+        await bot.telegram.deleteMessage(ctx.chat.id, processingMsg.message_id);
+      } catch {
+        // Ignore if we can't delete it
+      }
+
+      // Send the file to the user
+      await bot.telegram.sendDocument(ctx.chat.id, {
+        source: Buffer.from(md, "utf-8"),
+        filename,
+      });
+
+      await ctx.reply(`Session exported to: ${exportPath}`);
+    } catch (err) {
+      console.error("[Telegram] Error exporting session:", err);
+      await handleSessionError(chatId);
+      await ctx.reply(
+        "Sorry, there was an error exporting the session. Try again or use /new to start a fresh session."
+      );
+    }
+  });
+
   // Catch-all for unregistered / commands - forward to OpenCode
   bot.on("text", async (ctx) => {
     const userText = ctx.message.text;
@@ -614,6 +892,7 @@ export async function startTelegram(options: StartOptions) {
           body: {
             command: commandName,
             arguments: commandArgs,
+            agent: "default",
           },
         });
 
