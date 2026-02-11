@@ -192,6 +192,93 @@ describe("Telegram bot", () => {
     expect(texts.join("\n")).toContain("Final response");
   });
 
+  it("searches models and switches via /model", async () => {
+    const sessionsFilePath = createTempSessionsFile();
+    const { bot, dispatchText, sentMessages } = createMockBot();
+
+    const promptAsync = vi.fn(async () => ({ data: undefined, error: undefined }));
+    const client = createMockClient({
+      provider: {
+        list: vi.fn(async () => ({
+          data: {
+            connected: ["openai"],
+            all: [
+              {
+                id: "openai",
+                name: "OpenAI",
+                models: {
+                  "gpt-5.2-codex": { name: "gpt-5.2-codex" },
+                  "gpt-4.1": { name: "gpt-4.1" },
+                },
+              },
+            ],
+          },
+          error: undefined,
+        })),
+      },
+      session: {
+        create: vi.fn(async () => ({ data: { id: "ses_test" }, error: undefined })),
+        update: vi.fn(async () => ({ data: {}, error: undefined })),
+        promptAsync,
+      },
+      event: {
+        subscribe: vi.fn(async () => ({
+          stream: streamFrom([
+            {
+              type: "message.part.updated",
+              properties: { part: { type: "text", id: "prt_txt", sessionID: "ses_test", text: "Hi" } },
+            },
+            { type: "session.idle", properties: { sessionID: "ses_test" } },
+          ]),
+        })),
+      },
+    });
+
+    await startTelegram({
+      url: "http://localhost:4096",
+      launch: false,
+      client,
+      botFactory: () => bot as any,
+      sessionsFilePath,
+    });
+
+    await dispatchText("/model codex");
+    const listText = sentMessages.map((m) => m.text).join("\n");
+    expect(listText).toContain("1. gpt-5.2-codex (openai)");
+
+    await dispatchText("/model 1");
+    await dispatchText("Hello");
+
+    const call = (promptAsync as any).mock.calls.at(-1)?.[0];
+    expect(call?.body?.model).toEqual({ providerID: "openai", modelID: "gpt-5.2-codex" });
+  });
+
+  it("resets model override with /model default", async () => {
+    const sessionsFilePath = createTempSessionsFile();
+    const { bot, dispatchText } = createMockBot();
+
+    const client = createMockClient({
+      provider: {
+        list: vi.fn(async () => ({
+          data: { connected: ["openai"], all: [] },
+          error: undefined,
+        })),
+      },
+    });
+
+    await startTelegram({
+      url: "http://localhost:4096",
+      launch: false,
+      client,
+      botFactory: () => bot as any,
+      sessionsFilePath,
+    });
+
+    await dispatchText("/model default");
+    const data = JSON.parse(readFileSync(sessionsFilePath, "utf-8"));
+    expect(data.models?.["1"]).toBeUndefined();
+  });
+
   it("exports session markdown and sends a document", async () => {
     const sessionsFilePath = createTempSessionsFile();
     const exportDir = mkdtempSync(join(tmpdir(), "opencode-export-"));

@@ -107,6 +107,10 @@ These are handled directly by the Telegram bot:
 | `/export full` | Export with all details (thinking, costs, steps) |
 | `/verbose` | Toggle verbose mode (show thinking and tool calls in chat) |
 | `/verbose on|off` | Explicitly enable/disable verbose mode |
+| `/model` | Show current model and usage hints |
+| `/model <keyword>` | Search models by keyword |
+| `/model <number>` | Switch to a model from the last search |
+| `/model default` | Reset to the default model |
 | `/help` | Show available commands |
 
 ### Verbose Mode
@@ -128,6 +132,27 @@ Example with verbose mode on:
 
 Here's what I found in the auth module...
 ```
+
+### Model Switching
+
+Use `/model` to search and switch models without typing long names:
+
+```
+You:  /model sonnet
+Bot:  Models matching "sonnet":
+      1. claude-sonnet-4-5 (google-vertex-anthropic)
+      2. claude-sonnet-4 (anthropic)
+
+      Use /model <number> to select.
+
+You:  /model 1
+Bot:  Switched to claude-sonnet-4-5 (google-vertex-anthropic)
+```
+
+Other commands:
+
+- `/model` shows the current model and usage hints
+- `/model default` resets to the server default
 
 ### Session Export
 

@@ -52,6 +52,7 @@ Unit tests (`tests/app.test.ts`) cover:
 - Preventing deletion of the active session
 - Forwarding OpenCode commands (e.g. `/review`)
 - `/start` and `/help` output includes verbose commands
+- Model search and switching with `/model`
 
 Integration test (`tests/integration.test.ts`) covers:
 

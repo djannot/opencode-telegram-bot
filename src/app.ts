@@ -23,6 +23,9 @@ interface OpencodeClientLike {
   command: {
     list: (options?: any) => Promise<any>;
   };
+  provider: {
+    list: (options?: any) => Promise<any>;
+  };
   path: {
     get: (options?: any) => Promise<any>;
   };
@@ -120,7 +123,7 @@ export async function startTelegram(options: StartOptions) {
 
   // Telegram-only commands that should not be forwarded to OpenCode
   const telegramCommands = new Set([
-    "start", "help", "new", "sessions", "switch", "title", "delete", "export", "verbose",
+    "start", "help", "new", "sessions", "switch", "title", "delete", "export", "verbose", "model",
   ]);
 
   // Map of chatId -> sessionId for the active session per chat
@@ -129,6 +132,13 @@ export async function startTelegram(options: StartOptions) {
   const knownSessionIds = new Set<string>();
   // Set of chatIds with verbose mode enabled
   const chatVerboseMode = new Set<string>();
+  // Map of chatId -> model override (provider/model)
+  const chatModelOverride = new Map<string, string>();
+  // Map of chatId -> last search results (in-memory only)
+  const chatModelSearchResults = new Map<
+    string,
+    Array<{ providerID: string; modelID: string; displayName: string }>
+  >();
 
   /**
    * Save the chat-to-session mapping and known session IDs to disk.
@@ -139,6 +149,7 @@ export async function startTelegram(options: StartOptions) {
         active: Object.fromEntries(chatSessions),
         known: [...knownSessionIds],
         verbose: [...chatVerboseMode],
+        models: Object.fromEntries(chatModelOverride),
       };
       writeFileSync(sessionsFile, JSON.stringify(data, null, 2));
     } catch (err) {
@@ -155,6 +166,7 @@ export async function startTelegram(options: StartOptions) {
     let storedActive: Record<string, string> = {};
     let storedKnown: string[] = [];
     let storedVerbose: string[] = [];
+    let storedModels: Record<string, string> = {};
     if (existsSync(sessionsFile)) {
       try {
         const raw = readFileSync(sessionsFile, "utf-8");
@@ -164,6 +176,7 @@ export async function startTelegram(options: StartOptions) {
           storedActive = parsed.active;
           storedKnown = parsed.known || [];
           storedVerbose = parsed.verbose || [];
+          storedModels = parsed.models || {};
         } else {
           // Old format: flat { chatId: sessionId }
           storedActive = parsed;
@@ -184,6 +197,13 @@ export async function startTelegram(options: StartOptions) {
       console.log(
         `[Telegram] Restored verbose mode for ${storedVerbose.length} chat(s)`
       );
+    }
+
+    // Restore model overrides
+    for (const [chatId, modelId] of Object.entries(storedModels)) {
+      if (modelId) {
+        chatModelOverride.set(chatId, modelId);
+      }
     }
 
     // Fetch all server sessions once for validation and fallback matching
@@ -626,6 +646,7 @@ export async function startTelegram(options: StartOptions) {
       "/export full - Export with all details (thinking, costs, steps)\n" +
       "/verbose - Toggle verbose mode (show thinking and tool calls)\n" +
       "/verbose on|off - Set verbose mode explicitly\n" +
+      "/model - Show or search available models\n" +
       "/help - Show this help message\n";
 
     if (opencodeCommands.size > 0) {
@@ -651,6 +672,7 @@ export async function startTelegram(options: StartOptions) {
       "/export full - Export with all details (thinking, costs, steps)\n" +
       "/verbose - Toggle verbose mode (show thinking and tool calls)\n" +
       "/verbose on|off - Set verbose mode explicitly\n" +
+      "/model - Show or search available models\n" +
       "/help - Show this help message\n";
 
     if (opencodeCommands.size > 0) {
@@ -888,6 +910,109 @@ export async function startTelegram(options: StartOptions) {
         ? "Verbose mode enabled. Responses will include thinking and tool calls."
         : "Verbose mode disabled. Responses will only show the assistant's text."
     );
+  });
+
+  /**
+   * Fetch and search available models from connected providers.
+   */
+  async function searchModels(keyword: string) {
+    const list = await client.provider.list();
+    if (list.error || !list.data) {
+      throw new Error(`Failed to list providers: ${JSON.stringify(list.error)}`);
+    }
+
+    const connected = new Set<string>(list.data.connected || []);
+    const results: Array<{ providerID: string; modelID: string; displayName: string }> = [];
+    const query = keyword.toLowerCase();
+
+    for (const provider of list.data.all || []) {
+      if (!connected.has(provider.id)) continue;
+      const providerName = (provider.name || provider.id).toLowerCase();
+
+      const models = provider.models as Record<string, { name?: string }> | undefined;
+      for (const [modelID, model] of Object.entries(models || {})) {
+        const modelName = ((model && model.name) || modelID).toLowerCase();
+        if (
+          modelID.toLowerCase().includes(query) ||
+          modelName.includes(query) ||
+          providerName.includes(query)
+        ) {
+          const displayName = `${(model && model.name) || modelID} (${provider.id})`;
+          results.push({ providerID: provider.id, modelID, displayName });
+        }
+      }
+    }
+
+    return results;
+  }
+
+  // Handle /model command
+  // Usage: /model, /model <keyword>, /model <number>, /model default
+  bot.command("model", async (ctx) => {
+    const chatId = ctx.chat.id.toString();
+    const args = ctx.message.text.replace(/^\/model\s*/, "").trim();
+
+    if (!args) {
+      const current = chatModelOverride.get(chatId) || model || "server default";
+      await ctx.reply(
+        `Current model: ${current}\n\n` +
+          "Use /model <keyword> to search available models.\n" +
+          "Use /model default to reset to the default model."
+      );
+      return;
+    }
+
+    if (args.toLowerCase() === "default") {
+      chatModelOverride.delete(chatId);
+      saveSessions();
+      await ctx.reply("Model reset to the default model.");
+      return;
+    }
+
+    const asNumber = Number.parseInt(args, 10);
+    if (!Number.isNaN(asNumber) && String(asNumber) === args) {
+      const results = chatModelSearchResults.get(chatId) || [];
+      if (results.length === 0) {
+        await ctx.reply("No recent search results. Use /model <keyword> first.");
+        return;
+      }
+      if (asNumber < 1 || asNumber > results.length) {
+        await ctx.reply("Invalid selection. Use /model <number> from the latest search results.");
+        return;
+      }
+      const selection = results[asNumber - 1];
+      const value = `${selection.providerID}/${selection.modelID}`;
+      chatModelOverride.set(chatId, value);
+      saveSessions();
+      await ctx.reply(`Switched to ${selection.displayName}`);
+      return;
+    }
+
+    try {
+      const results = await searchModels(args);
+      if (results.length === 0) {
+        await ctx.reply(`No models found matching "${args}".`);
+        return;
+      }
+
+      const limited = results.slice(0, 10);
+      chatModelSearchResults.set(chatId, limited);
+
+      let msg = `Models matching "${args}":\n\n`;
+      for (const [index, item] of limited.entries()) {
+        msg += `${index + 1}. ${item.displayName}\n`;
+      }
+
+      if (results.length > limited.length) {
+        msg += `\nFound ${results.length} models. Refine your search to narrow the list.`;
+      }
+
+      msg += "\nUse /model <number> to select.";
+      await ctx.reply(msg);
+    } catch (err) {
+      console.error("[Telegram] Error searching models:", err);
+      await ctx.reply("Failed to list models. Try again later.");
+    }
   });
 
   /**
@@ -1248,8 +1373,9 @@ export async function startTelegram(options: StartOptions) {
       } = {
         parts: [{ type: "text", text: userText }],
       };
-      if (model) {
-        const [providerID, ...modelParts] = model.split("/");
+      const modelOverride = chatModelOverride.get(chatId) || model;
+      if (modelOverride) {
+        const [providerID, ...modelParts] = modelOverride.split("/");
         const modelID = modelParts.join("/");
         promptBody.model = { providerID, modelID };
       }

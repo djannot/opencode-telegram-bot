@@ -123,6 +123,9 @@ export function createMockClient(overrides: Partial<any> = {}) {
     command: {
       list: vi.fn(async () => ({ data: [], error: undefined })),
     },
+    provider: {
+      list: vi.fn(async () => ({ data: { all: [], connected: [] }, error: undefined })),
+    },
     path: {
       get: vi.fn(async () => ({ data: { directory: "/tmp" }, error: undefined })),
     },
