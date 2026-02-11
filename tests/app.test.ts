@@ -279,6 +279,67 @@ describe("Telegram bot", () => {
     expect(data.models?.["1"]).toBeUndefined();
   });
 
+  it("shows session usage with /usage", async () => {
+    const sessionsFilePath = createTempSessionsFile();
+    const { bot, dispatchText, sentMessages } = createMockBot();
+
+    const sessionId = "ses_test";
+    const client = createMockClient({
+      session: {
+        create: vi.fn(async () => ({ data: { id: sessionId }, error: undefined })),
+        update: vi.fn(async () => ({ data: {}, error: undefined })),
+        messages: vi.fn(async () => ({
+          data: [
+            {
+              info: {
+                role: "assistant",
+                cost: 0.01,
+                tokens: {
+                  input: 100,
+                  output: 200,
+                  reasoning: 50,
+                  cache: { read: 10, write: 5 },
+                },
+              },
+              parts: [],
+            },
+          ],
+          error: undefined,
+        })),
+        promptAsync: vi.fn(async () => ({ data: undefined, error: undefined })),
+      },
+      event: {
+        subscribe: vi.fn(async () => ({
+          stream: streamFrom([
+            {
+              type: "message.part.updated",
+              properties: {
+                part: { type: "text", id: "prt_txt", sessionID: sessionId, text: "Hi" },
+              },
+            },
+            { type: "session.idle", properties: { sessionID: sessionId } },
+          ]),
+        })),
+      },
+    });
+
+    await startTelegram({
+      url: "http://localhost:4096",
+      launch: false,
+      client,
+      botFactory: () => bot as any,
+      sessionsFilePath,
+    });
+
+    await dispatchText("Hello");
+    await dispatchText("/usage");
+
+    const text = sentMessages.map((m) => m.text).join("\n");
+    expect(text).toContain("Session usage:");
+    expect(text).toContain("Tokens: 350 total");
+    expect(text).toContain("Cost: $0.0100");
+  });
+
   it("exports session markdown and sends a document", async () => {
     const sessionsFilePath = createTempSessionsFile();
     const exportDir = mkdtempSync(join(tmpdir(), "opencode-export-"));

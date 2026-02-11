@@ -111,6 +111,7 @@ These are handled directly by the Telegram bot:
 | `/model <keyword>` | Search models by keyword |
 | `/model <number>` | Switch to a model from the last search |
 | `/model default` | Reset to the default model |
+| `/usage` | Show token and cost usage for this session |
 | `/help` | Show available commands |
 
 ### Verbose Mode
@@ -153,6 +154,18 @@ Other commands:
 
 - `/model` shows the current model and usage hints
 - `/model default` resets to the server default
+
+## Usage
+
+Use `/usage` to see the current session's token counts and estimated cost:
+
+```
+Session usage:
+- Assistant responses: 4
+- Tokens: 1200 total (input 600, output 500, reasoning 100)
+- Cache: read 1200, write 80
+- Cost: $0.0123
+```
 
 ### Session Export
 

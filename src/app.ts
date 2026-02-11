@@ -123,7 +123,7 @@ export async function startTelegram(options: StartOptions) {
 
   // Telegram-only commands that should not be forwarded to OpenCode
   const telegramCommands = new Set([
-    "start", "help", "new", "sessions", "switch", "title", "delete", "export", "verbose", "model",
+    "start", "help", "new", "sessions", "switch", "title", "delete", "export", "verbose", "model", "usage",
   ]);
 
   // Map of chatId -> sessionId for the active session per chat
@@ -647,6 +647,7 @@ export async function startTelegram(options: StartOptions) {
       "/verbose - Toggle verbose mode (show thinking and tool calls)\n" +
       "/verbose on|off - Set verbose mode explicitly\n" +
       "/model - Show or search available models\n" +
+      "/usage - Show token and cost usage for this session\n" +
       "/help - Show this help message\n";
 
     if (opencodeCommands.size > 0) {
@@ -673,6 +674,7 @@ export async function startTelegram(options: StartOptions) {
       "/verbose - Toggle verbose mode (show thinking and tool calls)\n" +
       "/verbose on|off - Set verbose mode explicitly\n" +
       "/model - Show or search available models\n" +
+      "/usage - Show token and cost usage for this session\n" +
       "/help - Show this help message\n";
 
     if (opencodeCommands.size > 0) {
@@ -1012,6 +1014,74 @@ export async function startTelegram(options: StartOptions) {
     } catch (err) {
       console.error("[Telegram] Error searching models:", err);
       await ctx.reply("Failed to list models. Try again later.");
+    }
+  });
+
+  // Handle /usage command - show token and cost usage for current session
+  bot.command("usage", async (ctx) => {
+    const chatId = ctx.chat.id.toString();
+    const sessionId = chatSessions.get(chatId);
+
+    if (!sessionId) {
+      await ctx.reply("No active session. Send a message first to create one.");
+      return;
+    }
+
+    try {
+      const messagesResult = await client.session.messages({
+        path: { id: sessionId },
+      });
+
+      if (messagesResult.error || !messagesResult.data) {
+        throw new Error(
+          `Failed to get messages: ${JSON.stringify(messagesResult.error)}`
+        );
+      }
+
+      let assistantCount = 0;
+      let costTotal = 0;
+      let inputTokens = 0;
+      let outputTokens = 0;
+      let reasoningTokens = 0;
+      let cacheRead = 0;
+      let cacheWrite = 0;
+
+      for (const msg of messagesResult.data) {
+        const info = msg.info as {
+          role: string;
+          cost?: number;
+          tokens?: {
+            input: number;
+            output: number;
+            reasoning: number;
+            cache: { read: number; write: number };
+          };
+        };
+        if (info.role !== "assistant") continue;
+        assistantCount += 1;
+        costTotal += info.cost || 0;
+        if (info.tokens) {
+          inputTokens += info.tokens.input || 0;
+          outputTokens += info.tokens.output || 0;
+          reasoningTokens += info.tokens.reasoning || 0;
+          cacheRead += info.tokens.cache?.read || 0;
+          cacheWrite += info.tokens.cache?.write || 0;
+        }
+      }
+
+      const totalTokens = inputTokens + outputTokens + reasoningTokens;
+      const lines = [
+        `Session usage:`,
+        `- Assistant responses: ${assistantCount}`,
+        `- Tokens: ${totalTokens} total (input ${inputTokens}, output ${outputTokens}, reasoning ${reasoningTokens})`,
+        `- Cache: read ${cacheRead}, write ${cacheWrite}`,
+        `- Cost: $${costTotal.toFixed(4)}`,
+      ];
+
+      await ctx.reply(lines.join("\n"));
+    } catch (err) {
+      console.error("[Telegram] Error getting usage:", err);
+      await ctx.reply("Failed to fetch usage. Try again later.");
     }
   });
 
