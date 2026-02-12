@@ -568,9 +568,79 @@ export async function startTelegram(options: StartOptions) {
     let processingMsgDeleted = false;
     const sentToolIds = new Set<string>();
     const sentReasoningIds = new Set<string>();
+    const sentSubtaskIds = new Set<string>();
+    let sawDelegation = false;
+    let sentSubagentDetails = false;
+    let sentSubagentResponseNotice = false;
+
+    function extractTaskId(outputText: string): string | null {
+      const match = outputText.match(/task[_-]?id:\s*([\w-]+)/i);
+      return match ? match[1] : null;
+    }
+
+    async function emitSubagentMessages(taskSessionId: string) {
+      try {
+        const messagesResult = await client.session.messages({
+          path: { id: taskSessionId },
+        });
+        if (messagesResult.error || !messagesResult.data) {
+          console.warn(
+            `[Telegram] Failed to fetch subagent messages for ${taskSessionId}: ${JSON.stringify(
+              messagesResult.error
+            )}`
+          );
+          return;
+        }
+        for (const msg of messagesResult.data) {
+          const info = msg.info as { role?: string } | undefined;
+          if (info?.role !== "assistant") continue;
+          const parts = msg.parts || [];
+          for (const part of parts) {
+            if (part.type === "reasoning") {
+              const text = part.text as string | undefined;
+              if (!text) continue;
+              const truncated = truncate(text.replace(/\n/g, " "), 500);
+              await sendTelegramMessage(
+                chatId,
+                `\u{1F9E0} Thinking (agent: subagent): ${truncated}`,
+                true
+              );
+              sentSubagentDetails = true;
+            }
+            if (part.type === "tool") {
+              const tool = part.tool as string;
+              const state = part.state as {
+                status: string;
+                input?: { [key: string]: unknown };
+                error?: string;
+              } | undefined;
+              if (!state) continue;
+              if (state.status !== "completed" && state.status !== "error") continue;
+              const summary = summarizeTool(tool, state.input);
+              let line = `\u{2699}\u{FE0F} ${summary} (agent: subagent)`;
+              if (state.status === "error") {
+                line += ` \u{274C}`;
+              }
+              await sendTelegramMessage(chatId, line, true);
+              sentSubagentDetails = true;
+            }
+          }
+        }
+        if (!sentSubagentResponseNotice) {
+          await sendTelegramMessage(
+            chatId,
+            "ℹ️ Subagent responded",
+            true
+          );
+          sentSubagentResponseNotice = true;
+        }
+      } catch (err) {
+        console.warn("[Telegram] Error fetching subagent messages:", err);
+      }
+    }
     // Buffer the latest reasoning text -- we send it when a non-reasoning part arrives
     // so we get the complete thinking block rather than a partial one
-    let pendingReasoning: { id: string; text: string } | null = null;
+    let pendingReasoning: { id: string; text: string; agent?: string } | null = null;
 
     /**
      * Delete the "processing" message once, right before sending the first real output.
@@ -594,7 +664,14 @@ export async function startTelegram(options: StartOptions) {
         sentReasoningIds.add(pendingReasoning.id);
         await deleteProcessingMsg();
         const truncated = truncate(pendingReasoning.text.replace(/\n/g, " "), 500);
-        await sendTelegramMessage(chatId, `\u{1F9E0} Thinking: ${truncated}`, true);
+        const agentLabel = pendingReasoning.agent
+          ? ` (agent: ${pendingReasoning.agent})`
+          : "";
+        await sendTelegramMessage(
+          chatId,
+          `\u{1F9E0} Thinking${agentLabel}: ${truncated}`,
+          true
+        );
       }
       pendingReasoning = null;
     }
@@ -611,15 +688,32 @@ export async function startTelegram(options: StartOptions) {
             [key: string]: unknown;
           };
 
-          // Only process events for our session
-          if (part.sessionID !== sessionId) continue;
+          const partSessionId = part.sessionID as string | undefined;
+          const parentSessionId =
+            (part.parentSessionID as string | undefined) ||
+            (part.parentSessionId as string | undefined);
+          const rootSessionId =
+            (part.rootSessionID as string | undefined) ||
+            (part.rootSessionId as string | undefined);
+          const isPrimarySession = partSessionId === sessionId;
+          const isChildSession =
+            parentSessionId === sessionId || rootSessionId === sessionId;
+
+          // Only process events for our session (or subagent sessions that link back)
+          if (!isPrimarySession && !isChildSession) continue;
+          if (!isPrimarySession && isChildSession && verbose) {
+            // Subagent events are allowed to stream in verbose mode
+          }
 
           const partText = part.text as string | undefined;
 
           if (part.type === "reasoning" && part.id) {
             // Buffer reasoning -- keep updating with the latest full text
             if (partText) {
-              pendingReasoning = { id: part.id, text: partText };
+              const agent =
+                (part.agent as string | undefined) ||
+                (!isPrimarySession ? "subagent" : undefined);
+              pendingReasoning = { id: part.id, text: partText, agent };
             }
           } else if (part.type === "tool" && part.id) {
             // A tool part arrived -- flush any pending reasoning first
@@ -629,6 +723,7 @@ export async function startTelegram(options: StartOptions) {
               const state = part.state as {
                 status: string;
                 input?: { [key: string]: unknown };
+                output?: unknown;
                 error?: string;
               } | undefined;
 
@@ -641,12 +736,81 @@ export async function startTelegram(options: StartOptions) {
               sentToolIds.add(part.id);
               await deleteProcessingMsg();
               const tool = part.tool as string;
-              const summary = summarizeTool(tool, state.input);
-              let line = `\u{2699}\u{FE0F} ${summary}`;
-              if (state.status === "error") {
-                line += ` \u{274C}`;
+              const agent =
+                (part.agent as string | undefined) ||
+                (!isPrimarySession ? "subagent" : undefined);
+              if (tool === "task") {
+                const input = state.input as
+                  | { description?: string; prompt?: string }
+                  | undefined;
+                const description =
+                  input?.description || input?.prompt || summarizeTool(tool, state.input);
+                let line = `\u{1F9E9} Delegated`;
+                if (description) {
+                  line += `: ${truncate(description, 120)}`;
+                }
+                if (agent) {
+                  line += ` (agent: ${agent})`;
+                }
+                if (state.status === "error") {
+                  line += ` \u{274C}`;
+                }
+                await sendTelegramMessage(chatId, line, true);
+                sawDelegation = true;
+                if (state.output && verbose) {
+                  const rawOutput =
+                    typeof state.output === "string"
+                      ? state.output
+                      : JSON.stringify(state.output, null, 2);
+                  const outputText = rawOutput.trim();
+                  if (outputText) {
+                    const taskSessionId = extractTaskId(outputText);
+                    if (taskSessionId) {
+                      await emitSubagentMessages(taskSessionId);
+                    }
+                    if (!sentSubagentDetails && !sentSubagentResponseNotice) {
+                      await sendTelegramMessage(
+                        chatId,
+                        "ℹ️ Subagent responded (no thought/tool details available)",
+                        true
+                      );
+                      sentSubagentResponseNotice = true;
+                    }
+                  }
+                }
+              } else {
+                const summary = summarizeTool(tool, state.input);
+                let line = `\u{2699}\u{FE0F} ${summary}`;
+                if (agent) {
+                  line += ` (agent: ${agent})`;
+                }
+                if (state.status === "error") {
+                  line += ` \u{274C}`;
+                }
+                await sendTelegramMessage(chatId, line, true);
               }
-              await sendTelegramMessage(chatId, line, true);
+              }
+            }
+          } else if (part.type === "subtask") {
+            await flushReasoning();
+            if (verbose) {
+              const id = part.id as string | undefined;
+              if (!id || !sentSubtaskIds.has(id)) {
+                if (id) sentSubtaskIds.add(id);
+                await deleteProcessingMsg();
+                const description = part.description as string | undefined;
+                const agent =
+                  (part.agent as string | undefined) ||
+                  (!isPrimarySession ? "subagent" : undefined);
+                let line = "\u{1F9E9} Delegated";
+                if (description) {
+                  line += `: ${truncate(description, 120)}`;
+                }
+                if (agent) {
+                  line += ` (agent: ${agent})`;
+                }
+                await sendTelegramMessage(chatId, line, true);
+                sawDelegation = true;
               }
             }
           } else if (part.type === "text") {
@@ -685,6 +849,31 @@ export async function startTelegram(options: StartOptions) {
     // Send the final text response
     if (!finalText) {
       finalText = "The agent returned an empty response.";
+    }
+    if (verbose && sawDelegation) {
+      const lines = finalText.split("\n");
+      let inTaskResult = false;
+      const filtered = lines.filter((line) => {
+        const trimmed = line.trim();
+        if (/^<task_result>$/i.test(trimmed)) {
+          inTaskResult = true;
+          return false;
+        }
+        if (/^<\/task_result>$/i.test(trimmed)) {
+          inTaskResult = false;
+          return false;
+        }
+        if (inTaskResult) return false;
+        if (/^Subagent response:/i.test(trimmed)) return false;
+        if (/^Subagent (ran|returned|reported)/i.test(trimmed)) return false;
+        if (/^Ran the subagent/i.test(trimmed)) return false;
+        return true;
+      });
+      const cleaned = filtered.join("\n").trim();
+      if (!cleaned) {
+        return;
+      }
+      finalText = cleaned;
     }
 
     const chunks = splitMessage(finalText, 4096);

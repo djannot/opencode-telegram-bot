@@ -80,16 +80,38 @@ describe("Telegram bot", () => {
     expect(dataOff.verbose).not.toContain("1");
   });
 
-  it("streams verbose messages with thinking and tool calls", async () => {
+  it("streams verbose messages with thinking, tool calls, and subagent details", async () => {
     const sessionsFilePath = createTempSessionsFile();
     const { bot, dispatchText, sentMessages } = createMockBot();
 
     const sessionId = "ses_test";
+    const subagentSessionId = "ses_subagent";
     const client = createMockClient({
       session: {
         list: vi.fn(async () => ({ data: [], error: undefined })),
         create: vi.fn(async () => ({ data: { id: sessionId }, error: undefined })),
         update: vi.fn(async () => ({ data: {}, error: undefined })),
+        messages: vi.fn(async (options: any) => {
+          if (options?.path?.id !== subagentSessionId) {
+            return { data: [], error: undefined };
+          }
+          return {
+            data: [
+              {
+                info: { role: "assistant" },
+                parts: [
+                  { type: "reasoning", text: "Subagent reasoning" },
+                  {
+                    type: "tool",
+                    tool: "glob",
+                    state: { status: "completed", input: { pattern: "*.md" } },
+                  },
+                ],
+              },
+            ],
+            error: undefined,
+          };
+        }),
         promptAsync: vi.fn(async () => ({ data: undefined, error: undefined })),
       },
       event: {
@@ -102,7 +124,20 @@ describe("Telegram bot", () => {
                   type: "reasoning",
                   id: "prt_r",
                   sessionID: sessionId,
+                  agent: "search",
                   text: "Thinking: test reasoning",
+                },
+              },
+            },
+            {
+              type: "message.part.updated",
+              properties: {
+                part: {
+                  type: "subtask",
+                  id: "prt_s",
+                  sessionID: sessionId,
+                  agent: "search",
+                  description: "Find relevant docs",
                 },
               },
             },
@@ -114,9 +149,26 @@ describe("Telegram bot", () => {
                   id: "prt_t",
                   sessionID: sessionId,
                   tool: "read",
+                  agent: "search",
                   state: {
                     status: "completed",
                     input: { filePath: "src/app.ts" },
+                  },
+                },
+              },
+            },
+            {
+              type: "message.part.updated",
+              properties: {
+                part: {
+                  type: "tool",
+                  id: "prt_task",
+                  sessionID: sessionId,
+                  tool: "task",
+                  state: {
+                    status: "completed",
+                    input: { description: "Use a tool and report back" },
+                    output: `task_id: ${subagentSessionId}`,
                   },
                 },
               },
@@ -153,8 +205,13 @@ describe("Telegram bot", () => {
     await dispatchText("Hello");
 
     const texts = sentMessages.map((m) => m.text);
-    expect(texts.join("\n")).toContain("🧠 Thinking:");
-    expect(texts.join("\n")).toContain("⚙️ read -- src/app.ts");
+    expect(texts.join("\n")).toContain("🧠 Thinking (agent: search):");
+    expect(texts.join("\n")).toContain("🧩 Delegated: Find relevant docs (agent: search)");
+    expect(texts.join("\n")).toContain("⚙️ read -- src/app.ts (agent: search)");
+    expect(texts.join("\n")).toContain("🧩 Delegated: Use a tool and report back");
+    expect(texts.join("\n")).toContain("🧠 Thinking (agent: subagent):");
+    expect(texts.join("\n")).toContain("⚙️ glob -- *.md (agent: subagent)");
+    expect(texts.join("\n")).toContain("ℹ️ Subagent responded");
     expect(texts.join("\n")).toContain("Final response");
   });
 

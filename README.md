@@ -122,7 +122,9 @@ The bot also registers these commands in Telegram's command menu (the `/` button
 By default, the bot only shows the assistant's final text response. Use `/verbose` to toggle verbose mode (or `/verbose on|off` to set it explicitly), which also displays:
 
 - **Thinking/reasoning** -- shown as plain text with a 🧠 prefix, truncated to 500 characters
-- **Tool calls** -- shown as a compact one-line summary (e.g. `> read -- src/app.ts`)
+- **Tool calls** -- shown as a compact one-line summary (e.g. `⚙️ read -- src/app.ts`)
+- **Delegations** -- shown when work is delegated to a subagent (e.g. `🧩 Delegated: Find relevant docs`)
+- **Subagent details** -- reasoning/tool calls from subagents when available, plus a short `ℹ️ Subagent responded` notice
 
 Verbose mode is per-chat and persists across bot restarts. Use `/verbose` again to turn it off.
 
@@ -133,6 +135,11 @@ Example with verbose mode on:
 
 ⚙️ grep -- pattern: "authenticate" in src/
 ⚙️ read -- src/auth/handler.ts
+
+🧩 Delegated: Search auth docs
+🧠 Thinking (agent: subagent): Scanning docs for auth references...
+⚙️ read -- README.md (agent: subagent)
+ℹ️ Subagent responded
 
 Here's what I found in the auth module...
 ```
