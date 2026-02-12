@@ -2,6 +2,10 @@
 
 A Telegram bot that forwards messages to an [OpenCode](https://opencode.ai) agent and returns the responses. Each chat gets a persistent session, so the agent remembers conversation context across messages.
 
+## 🎥 Demo
+
+https://github.com/user-attachments/assets/e071f536-7036-4e9c-a5fb-c77414626825
+
 ## Prerequisites
 
 - [Node.js](https://nodejs.org/) 18+
