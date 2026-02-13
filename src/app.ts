@@ -123,10 +123,12 @@ export async function startTelegram(options: StartOptions) {
         const name = cmd.name;
         if (!name) continue;
         opencodeCommands.add(name);
-        if (!isHiddenOpenCodeCommand(name)) {
+        console.log(`[Telegram] Found OpenCode command: ${name}`);
+        if (!isHiddenOpenCodeCommand(name) && /^[a-z0-9_]{1,32}$/.test(name)) {
+          const desc = cmd.description || "OpenCode command";
           opencodeCommandMenu.push({
             command: name,
-            description: cmd.description || "OpenCode command",
+            description: desc.length > 256 ? desc.slice(0, 253) + "..." : desc,
           });
         }
       }
@@ -1961,9 +1963,10 @@ export async function startTelegram(options: StartOptions) {
 
   if (options.launch !== false) {
     try {
-      // Start the bot
+      // Start the bot — launch() returns a promise that resolves only
+      // when polling stops, so we log before awaiting it.
+      console.log("[Telegram] Bot is running (long-polling started)");
       await bot.launch();
-      console.log("[Telegram] Bot is running");
 
       // Enable graceful stop
       process.once("SIGINT", () => bot.stop("SIGINT"));
