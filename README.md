@@ -115,7 +115,21 @@ These are handled directly by the Telegram bot:
 | `/usage` | Show token and cost usage for this session |
 | `/help` | Show available commands |
 
-The bot also registers these commands in Telegram's command menu (the `/` button), plus any OpenCode server commands discovered at startup (excluding hidden ones like `/init` and `/review`).
+### Interactive Questions
+
+When the OpenCode agent asks a question (e.g. to clarify intent or pick from options), the bot forwards it to Telegram as **inline keyboard buttons**. Tap an option to answer, or tap **Dismiss** to reject the question.
+
+If the bot restarts while a question is pending, it automatically re-sends the question buttons on startup so the session is not left stuck.
+
+```
+Agent: Which area do you want to focus on?
+       [Code review]  [Bug fix]  [New feature]  [Dismiss]
+
+You:   [tap "Bug fix"]
+Bot:   Answered: Bug fix
+```
+
+The bot also registers these commands in Telegram's command menu (the `/` button), plus any OpenCode server commands discovered at startup.
 
 ### Verbose Mode
 
@@ -249,6 +263,15 @@ Sessions survive bot restarts. The bot saves the chat-to-session mapping to `ses
 4. If the file is missing entirely, scans all server sessions for ones matching the title convention
 
 This means you can restart the bot (or even delete `sessions.json`) and it will reconnect to existing sessions automatically.
+
+## Resilience
+
+The bot is designed to survive restarts and failures:
+
+- **Drop pending updates** -- On startup, stale Telegram updates are discarded so old button clicks and messages from a previous run are not replayed.
+- **Pending question recovery** -- If the bot restarts while the agent is waiting for a question answer, the question is re-sent to Telegram on startup so the session can be unblocked.
+- **Global error handler** -- Unhandled errors in Telegram update handlers are logged instead of crashing the process.
+- **Handler timeout** -- Telegraf's handler timeout is set to 10 minutes (up from 90 seconds) to accommodate long-running LLM responses.
 
 ## Environment Variables
 

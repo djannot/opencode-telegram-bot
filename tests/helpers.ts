@@ -54,6 +54,7 @@ export function createMockBot() {
     action(trigger: string | RegExp, fn: (ctx: any) => Promise<void> | void) {
       actionHandlers.push({ trigger, handler: fn });
     },
+    catch: vi.fn(() => {}),
     launch: vi.fn(async () => {}),
     stop: vi.fn(() => {}),
     telegram,
@@ -255,6 +256,11 @@ export function createMockClient(overrides: Partial<any> = {}) {
     event: {
       subscribe: vi.fn(async () => ({ stream: streamFrom([]) })),
     },
+    question: {
+      list: vi.fn(async () => ({ data: [], error: undefined })),
+      reply: vi.fn(async () => ({ data: {}, error: undefined })),
+      reject: vi.fn(async () => ({ data: {}, error: undefined })),
+    },
   };
 
   return {
@@ -264,5 +270,6 @@ export function createMockClient(overrides: Partial<any> = {}) {
     command: { ...base.command, ...(overrides as any).command },
     path: { ...base.path, ...(overrides as any).path },
     event: { ...base.event, ...(overrides as any).event },
+    question: { ...base.question, ...(overrides as any).question },
   };
 }

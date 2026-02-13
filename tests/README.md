@@ -44,7 +44,7 @@ OPENCODE_TEST_MODEL=openai/gpt-5.2-codex npm run test:integration
 Unit tests (`tests/app.test.ts`) cover:
 
 - Verbose mode toggle and persistence to `sessions.json`
-- Streaming responses in verbose mode (thinking + tool call summaries + final text)
+- Streaming responses in verbose mode (thinking + tool call summaries + subagent details + final text)
 - Streaming responses in non-verbose mode (final text only)
 - Session export (`/export`) writes markdown and sends a document
 - Session listing and switching by inline buttons
@@ -56,7 +56,9 @@ Unit tests (`tests/app.test.ts`) cover:
 - Session usage reporting with `/usage`
 - File uploads forwarded as file parts
 - Text file uploads are inlined as text parts
+- Telegram command menu registration (filters invalid names, truncates descriptions)
 
 Integration test (`tests/integration.test.ts`) covers:
 
 - End-to-end streaming of a real OpenCode response (requires `OPENCODE_TEST_URL`)
+- Polls for detached streaming results (up to 30 seconds)

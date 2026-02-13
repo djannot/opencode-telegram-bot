@@ -1,5 +1,5 @@
 import { Telegraf } from "telegraf";
-import { createOpencodeClient } from "@opencode-ai/sdk";
+import { createOpencodeClient } from "@opencode-ai/sdk/v2";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,26 +11,31 @@ const SESSIONS_FILE = resolve(__dirname, "..", "sessions.json");
 
 interface OpencodeClientLike {
   session: {
-    list: (options?: any) => Promise<any>;
-    create: (options: any) => Promise<any>;
-    update: (options: any) => Promise<any>;
-    delete: (options: any) => Promise<any>;
-    get: (options: any) => Promise<any>;
-    messages: (options: any) => Promise<any>;
-    command: (options: any) => Promise<any>;
-    promptAsync: (options: any) => Promise<any>;
+    list: (params?: any, options?: any) => Promise<any>;
+    create: (params: any, options?: any) => Promise<any>;
+    update: (params: any, options?: any) => Promise<any>;
+    delete: (params: any, options?: any) => Promise<any>;
+    get: (params: any, options?: any) => Promise<any>;
+    messages: (params: any, options?: any) => Promise<any>;
+    command: (params: any, options?: any) => Promise<any>;
+    promptAsync: (params: any, options?: any) => Promise<any>;
   };
   command: {
-    list: (options?: any) => Promise<any>;
+    list: (params?: any, options?: any) => Promise<any>;
   };
   provider: {
-    list: (options?: any) => Promise<any>;
+    list: (params?: any, options?: any) => Promise<any>;
   };
   path: {
-    get: (options?: any) => Promise<any>;
+    get: (params?: any, options?: any) => Promise<any>;
   };
   event: {
-    subscribe: (options?: any) => Promise<any>;
+    subscribe: (params?: any, options?: any) => Promise<any>;
+  };
+  question: {
+    list: (params?: any, options?: any) => Promise<any>;
+    reply: (params: any, options?: any) => Promise<any>;
+    reject: (params: any, options?: any) => Promise<any>;
   };
 }
 
@@ -49,12 +54,13 @@ interface StartOptions {
 
 interface TelegramBot {
   use: (fn: (ctx: any, next: () => Promise<void>) => Promise<void> | void) => void;
+  catch: (fn: (err: unknown, ctx: any) => void) => void;
   start: (fn: (ctx: any) => void | Promise<void>) => void;
   help: (fn: (ctx: any) => void | Promise<void>) => void;
   command: (command: string, fn: (ctx: any) => void | Promise<void>) => void;
   on: (event: string, fn: (ctx: any) => void | Promise<void>) => void;
   action: (trigger: string | RegExp, fn: (ctx: any) => void | Promise<void>) => void;
-  launch: () => Promise<void>;
+  launch: (options?: { dropPendingUpdates?: boolean }) => Promise<void>;
   stop: (reason?: string) => void;
   telegram: {
     sendMessage: (chatId: number, text: string, options?: Record<string, unknown>) => Promise<void>;
@@ -103,21 +109,21 @@ export async function startTelegram(options: StartOptions) {
     hiddenOpenCodeCommands.has(name.toLowerCase());
   let projectDirectory = "";
   try {
-    const sessions = await client.session.list();
+    const sessions = await client.session.list({});
     if (sessions.error) {
       throw new Error(`Server returned error: ${JSON.stringify(sessions.error)}`);
     }
     console.log(`[Telegram] Connected to OpenCode server at ${url}`);
 
     // Fetch the project directory (needed for SSE event subscription)
-    const pathResult = await client.path.get();
+    const pathResult = await client.path.get({});
     if (pathResult.data?.directory) {
       projectDirectory = pathResult.data.directory;
       console.log(`[Telegram] Project directory: ${projectDirectory}`);
     }
 
     // Fetch available OpenCode commands
-    const cmds = await client.command.list();
+    const cmds = await client.command.list({});
     if (cmds.data) {
       for (const cmd of cmds.data) {
         const name = cmd.name;
@@ -173,6 +179,20 @@ export async function startTelegram(options: StartOptions) {
   const chatModelSearchResults = new Map<
     string,
     Array<{ providerID: string; modelID: string; displayName: string }>
+  >();
+  // Map of questionId -> pending question context (for forwarding OpenCode questions to Telegram)
+  const pendingQuestions = new Map<
+    string,
+    {
+      chatId: string;
+      sessionId: string;
+      questions: Array<{
+        question: string;
+        header: string;
+        options: Array<{ label: string; description: string }>;
+        multiple: boolean;
+      }>;
+    }
   >();
 
   /**
@@ -244,7 +264,7 @@ export async function startTelegram(options: StartOptions) {
     // Fetch all server sessions once for validation and fallback matching
     let serverSessions: Array<{ id: string; title: string }> = [];
     try {
-      const list = await client.session.list();
+      const list = await client.session.list({});
       if (list.data) {
         serverSessions = list.data;
       }
@@ -316,6 +336,14 @@ export async function startTelegram(options: StartOptions) {
   // Restore sessions from previous runs
   await restoreSessions();
 
+  // Build a reverse lookup: sessionId -> chatId
+  function sessionToChatId(sessionId: string): string | undefined {
+    for (const [chatId, sid] of chatSessions) {
+      if (sid === sessionId) return chatId;
+    }
+    return undefined;
+  }
+
   // Track which sessions were just created so we can auto-title them
   const newlyCreatedSessions = new Set<string>();
 
@@ -326,7 +354,7 @@ export async function startTelegram(options: StartOptions) {
     let sessionId = chatSessions.get(chatId);
     if (!sessionId) {
       const session = await client.session.create({
-        body: { title: `Telegram chat ${chatId}` },
+        title: `Telegram chat ${chatId}`,
       });
       if (session.error || !session.data) {
         throw new Error(
@@ -359,8 +387,8 @@ export async function startTelegram(options: StartOptions) {
     const title = truncate(userText.replace(/\n/g, " "), 100);
     try {
       await client.session.update({
-        path: { id: sessionId },
-        body: { title },
+        sessionID: sessionId,
+        title,
       });
       console.log(`[Telegram] Auto-titled session ${sessionId}: "${title}"`);
     } catch (err) {
@@ -394,11 +422,25 @@ export async function startTelegram(options: StartOptions) {
 
   async function answerAndEdit(ctx: any, text: string) {
     if (typeof ctx.answerCbQuery === "function") {
-      await ctx.answerCbQuery();
+      try {
+        await ctx.answerCbQuery();
+      } catch {
+        // Ignore "query is too old" or other callback query errors —
+        // the callback may have expired but we still want to update the message.
+      }
     }
 
     if (typeof ctx.editMessageText === "function") {
-      await ctx.editMessageText(text);
+      try {
+        await ctx.editMessageText(text);
+      } catch {
+        // If edit fails (message deleted, too old, etc.), fall back to reply
+        try {
+          await ctx.reply(text);
+        } catch {
+          // Give up silently
+        }
+      }
       return;
     }
 
@@ -546,18 +588,18 @@ export async function startTelegram(options: StartOptions) {
   ) {
     // Subscribe to SSE events before sending the prompt so we don't miss anything
     const abortController = new AbortController();
-    // Subscribe to SSE events before sending the prompt so we don't miss anything
-    const subscribeOptions: Record<string, unknown> = {
-      signal: abortController.signal,
-    };
+    const subscribeParams: Record<string, unknown> = {};
     if (projectDirectory) {
-      subscribeOptions.query = { directory: projectDirectory };
+      subscribeParams.directory = projectDirectory;
     }
-    const { stream } = await client.event.subscribe(subscribeOptions as never);
+    const { stream } = await client.event.subscribe(
+      subscribeParams,
+      { signal: abortController.signal } as any
+    );
     // Fire the prompt asynchronously (returns immediately)
     const asyncResult = await client.session.promptAsync({
-      path: { id: sessionId },
-      body: promptBody,
+      sessionID: sessionId,
+      ...promptBody,
     });
 
     if (asyncResult.error) {
@@ -583,7 +625,7 @@ export async function startTelegram(options: StartOptions) {
     async function emitSubagentMessages(taskSessionId: string) {
       try {
         const messagesResult = await client.session.messages({
-          path: { id: taskSessionId },
+          sessionID: taskSessionId,
         });
         if (messagesResult.error || !messagesResult.data) {
           console.warn(
@@ -839,6 +881,54 @@ export async function startTelegram(options: StartOptions) {
             const errorMsg = error?.data?.message || "Unknown error";
             throw new Error(`Session error: ${errorMsg}`);
           }
+        } else if (ev.type === "question.asked" && ev.properties) {
+          const questionSessionId = ev.properties.sessionID as string | undefined;
+          if (questionSessionId === sessionId) {
+            const questionId = ev.properties.id as string;
+            const questions = ev.properties.questions as Array<{
+              question: string;
+              header: string;
+              options: Array<{ label: string; description: string }>;
+              multiple: boolean;
+            }>;
+
+            if (questionId && questions?.length > 0) {
+              // Store the pending question
+              pendingQuestions.set(questionId, {
+                chatId: chatId.toString(),
+                sessionId,
+                questions,
+              });
+
+              console.log(`[Telegram] Sending ${questions.length} question(s) to chat ${chatId} (question ${questionId})`);
+
+              // Send each question to Telegram with inline buttons
+              for (let qi = 0; qi < questions.length; qi++) {
+                const q = questions[qi];
+                let msg = "";
+                if (q.header) msg += `*${q.header}*\n`;
+                msg += q.question;
+
+                const keyboard = q.options.map((opt, oi) => [
+                  {
+                    text: opt.label,
+                    callback_data: `qa:${questionId}:${qi}:${oi}`,
+                  },
+                ]);
+                // Add a dismiss/reject button
+                keyboard.push([
+                  { text: "Dismiss", callback_data: `qa_reject:${questionId}` },
+                ]);
+
+                await bot.telegram.sendMessage(chatId, msg, {
+                  parse_mode: "Markdown",
+                  reply_markup: {
+                    inline_keyboard: keyboard,
+                  },
+                });
+              }
+            }
+          }
         }
       }
     } finally {
@@ -872,10 +962,11 @@ export async function startTelegram(options: StartOptions) {
         return true;
       });
       const cleaned = filtered.join("\n").trim();
-      if (!cleaned) {
-        return;
+      // If the cleaned text is non-empty, use it; otherwise keep the
+      // original finalText so the user still sees the agent's conclusion.
+      if (cleaned) {
+        finalText = cleaned;
       }
-      finalText = cleaned;
     }
 
     const chunks = splitMessage(finalText, 4096);
@@ -921,15 +1012,24 @@ export async function startTelegram(options: StartOptions) {
       const promptBody = buildPromptBody(chatId, parts);
       const verbose = chatVerboseMode.has(chatId);
 
-      await sendPromptStreaming(
+      // Fire detached so the handler completes and Telegraf can process
+      // subsequent updates (e.g. callback queries from question buttons).
+      sendPromptStreaming(
         ctx.chat.id,
         sessionId,
         promptBody,
         processingMsg.message_id,
         verbose
-      );
+      ).catch(async (err) => {
+        console.error("[Telegram] Error processing file message:", err);
+        await handleSessionError(chatId);
+        await sendTelegramMessage(
+          ctx.chat.id,
+          "Sorry, there was an error processing your request. Try again or use /new to start a fresh session."
+        );
+      });
     } catch (err) {
-      console.error("[Telegram] Error processing file message:", err);
+      console.error("[Telegram] Error setting up file message:", err);
       await handleSessionError(chatId);
       await ctx.reply(
         "Sorry, there was an error processing your request. Try again or use /new to start a fresh session."
@@ -945,7 +1045,7 @@ export async function startTelegram(options: StartOptions) {
     if (sessionId) {
       try {
         const check = await client.session.get({
-          path: { id: sessionId },
+          sessionID: sessionId,
         });
         if (check.error) {
           chatSessions.delete(chatId);
@@ -963,7 +1063,7 @@ export async function startTelegram(options: StartOptions) {
   // Initialize Telegram bot
   const bot: TelegramBot = options.botFactory
     ? options.botFactory(token)
-    : (new Telegraf(token) as unknown as TelegramBot);
+    : (new Telegraf(token, { handlerTimeout: 600_000 }) as unknown as TelegramBot);
 
   async function registerCommandMenu() {
     const combined = [...telegramCommandMenu, ...opencodeCommandMenu];
@@ -982,6 +1082,12 @@ export async function startTelegram(options: StartOptions) {
       console.warn("[Telegram] Failed to register command menu:", err);
     }
   }
+
+  // Global error handler — prevents unhandled errors from crashing the process
+  bot.catch((err: unknown, ctx: any) => {
+    const updateType = ctx?.updateType || "unknown";
+    console.error(`[Telegram] Unhandled error in ${updateType} handler:`, err);
+  });
 
   // Middleware to check if the user is authorized
   bot.use((ctx, next) => {
@@ -1072,7 +1178,7 @@ export async function startTelegram(options: StartOptions) {
    * Get the list of known sessions, sorted by most recently updated.
    */
   async function getKnownSessions(): Promise<SessionListItem[]> {
-    const list = await client.session.list();
+    const list = await client.session.list({});
     const data = (list.data || []) as SessionListItem[];
     if (data.length === 0) return [];
     return data
@@ -1201,8 +1307,8 @@ export async function startTelegram(options: StartOptions) {
 
     try {
       const result = await client.session.update({
-        path: { id: sessionId },
-        body: { title: newTitle },
+        sessionID: sessionId,
+        title: newTitle,
       });
 
       if (result.error) {
@@ -1253,7 +1359,7 @@ export async function startTelegram(options: StartOptions) {
 
       // Delete from the server
       const result = await client.session.delete({
-        path: { id: match.id },
+        sessionID: match.id,
       });
 
       if (result.error) {
@@ -1319,7 +1425,7 @@ export async function startTelegram(options: StartOptions) {
       }
 
       const result = await client.session.delete({
-        path: { id: match.id },
+        sessionID: match.id,
       });
 
       if (result.error) {
@@ -1368,7 +1474,7 @@ export async function startTelegram(options: StartOptions) {
    * Fetch and search available models from connected providers.
    */
   async function searchModels(keyword: string) {
-    const list = await client.provider.list();
+    const list = await client.provider.list({});
     if (list.error || !list.data) {
       throw new Error(`Failed to list providers: ${JSON.stringify(list.error)}`);
     }
@@ -1489,6 +1595,80 @@ export async function startTelegram(options: StartOptions) {
     await answerAndEdit(ctx, "Model reset to the default model.");
   });
 
+  // Handle question answer callback (from OpenCode question.asked events)
+  bot.action(/^qa:([^:]+):(\d+):(\d+)$/, async (ctx) => {
+    console.log("[Telegram] Question answer callback received:", ctx.match?.[0]);
+    const questionId = ctx.match?.[1];
+    const questionIndex = Number.parseInt(ctx.match?.[2] || "0", 10);
+    const optionIndex = Number.parseInt(ctx.match?.[3] || "0", 10);
+    if (!questionId) return;
+
+    const pending = pendingQuestions.get(questionId);
+    if (!pending) {
+      await answerAndEdit(ctx, "This question has expired or was already answered.");
+      return;
+    }
+
+    const question = pending.questions[questionIndex];
+    if (!question) {
+      await answerAndEdit(ctx, "Invalid question.");
+      return;
+    }
+
+    const selectedOption = question.options[optionIndex];
+    if (!selectedOption) {
+      await answerAndEdit(ctx, "Invalid option.");
+      return;
+    }
+
+    try {
+      // Build answers array: one answer per question, using the selected option label
+      const answers = pending.questions.map((q, i) => {
+        if (i === questionIndex) {
+          return [selectedOption.label];
+        }
+        // For other questions in the same request, auto-select first option
+        return [q.options[0]?.label || ""];
+      });
+
+      await client.question.reply({
+        requestID: questionId,
+        answers,
+      });
+
+      pendingQuestions.delete(questionId);
+      await answerAndEdit(ctx, `Answered: ${selectedOption.label}`);
+    } catch (err) {
+      console.error("[Telegram] Error answering question:", err);
+      await answerAndEdit(ctx, "Failed to submit answer.");
+    }
+  });
+
+  // Handle question reject/dismiss callback
+  bot.action(/^qa_reject:(.+)$/, async (ctx) => {
+    console.log("[Telegram] Question reject callback received:", ctx.match?.[0]);
+    const questionId = ctx.match?.[1];
+    if (!questionId) return;
+
+    const pending = pendingQuestions.get(questionId);
+    if (!pending) {
+      await answerAndEdit(ctx, "This question has expired or was already answered.");
+      return;
+    }
+
+    try {
+      await client.question.reject({
+        requestID: questionId,
+      });
+
+      pendingQuestions.delete(questionId);
+      await answerAndEdit(ctx, "Question dismissed.");
+    } catch (err) {
+      console.error("[Telegram] Error rejecting question:", err);
+      await answerAndEdit(ctx, "Failed to dismiss question.");
+    }
+  });
+
   // Handle /usage command - show token and cost usage for current session
   bot.command("usage", async (ctx) => {
     const chatId = ctx.chat.id.toString();
@@ -1501,7 +1681,7 @@ export async function startTelegram(options: StartOptions) {
 
     try {
       const messagesResult = await client.session.messages({
-        path: { id: sessionId },
+        sessionID: sessionId,
       });
 
       if (messagesResult.error || !messagesResult.data) {
@@ -1748,9 +1928,9 @@ export async function startTelegram(options: StartOptions) {
 
       // Fetch session info and messages in parallel
       const [sessionResult, messagesResult, pathResult] = await Promise.all([
-        client.session.get({ path: { id: sessionId } }),
-        client.session.messages({ path: { id: sessionId } }),
-        client.path.get(),
+        client.session.get({ sessionID: sessionId }),
+        client.session.messages({ sessionID: sessionId }),
+        client.path.get({}),
       ]);
 
       if (sessionResult.error || !sessionResult.data) {
@@ -1899,12 +2079,10 @@ export async function startTelegram(options: StartOptions) {
         const sessionId = await getOrCreateSession(chatId);
 
         const result = await client.session.command({
-          path: { id: sessionId },
-          body: {
-            command: commandName,
-            arguments: commandArgs,
-            agent: "default",
-          },
+          sessionID: sessionId,
+          command: commandName,
+          arguments: commandArgs,
+          agent: "default",
         });
 
         if (result.error) {
@@ -1945,15 +2123,24 @@ export async function startTelegram(options: StartOptions) {
 
       const verbose = chatVerboseMode.has(chatId);
 
-      await sendPromptStreaming(
+      // Fire detached so the handler completes and Telegraf can process
+      // subsequent updates (e.g. callback queries from question buttons).
+      sendPromptStreaming(
         ctx.chat.id,
         sessionId,
         promptBody,
         processingMsg.message_id,
         verbose
-      );
+      ).catch(async (err) => {
+        console.error("[Telegram] Error processing message:", err);
+        await handleSessionError(chatId);
+        await sendTelegramMessage(
+          ctx.chat.id,
+          "Sorry, there was an error processing your request. Try again or use /new to start a fresh session."
+        );
+      });
     } catch (err) {
-      console.error("[Telegram] Error processing message:", err);
+      console.error("[Telegram] Error setting up message:", err);
       await handleSessionError(chatId);
       await ctx.reply(
         "Sorry, there was an error processing your request. Try again or use /new to start a fresh session."
@@ -1961,12 +2148,87 @@ export async function startTelegram(options: StartOptions) {
     }
   });
 
+  // Check for pending questions left over from previous bot runs.
+  // If any exist for a session we know about, re-forward them to Telegram
+  // so the user can answer them and unblock the session.
+  try {
+    const pendingResult = await client.question.list({});
+    if (pendingResult.data && pendingResult.data.length > 0) {
+      console.log(
+        `[Telegram] Found ${pendingResult.data.length} pending question(s) from previous run`
+      );
+      for (const pq of pendingResult.data) {
+        const questionId = pq.id as string;
+        const questionSessionId = pq.sessionID as string;
+        const questions = pq.questions as Array<{
+          question: string;
+          header: string;
+          options: Array<{ label: string; description: string }>;
+          multiple: boolean;
+        }>;
+        const chatId = sessionToChatId(questionSessionId);
+        if (!chatId || !questionId || !questions?.length) {
+          // No matching chat — reject the stale question to unblock the session
+          console.log(
+            `[Telegram] Rejecting orphan pending question ${questionId} (no matching chat)`
+          );
+          try {
+            await client.question.reject({ requestID: questionId });
+          } catch (err) {
+            console.warn(`[Telegram] Failed to reject orphan question ${questionId}:`, err);
+          }
+          continue;
+        }
+
+        // Store in pendingQuestions and re-send inline keyboard
+        pendingQuestions.set(questionId, {
+          chatId,
+          sessionId: questionSessionId,
+          questions,
+        });
+
+        const numericChatId = Number(chatId);
+        for (let qi = 0; qi < questions.length; qi++) {
+          const q = questions[qi];
+          let msg = "";
+          if (q.header) msg += `*${q.header}*\n`;
+          msg += q.question;
+          msg += "\n_(resumed from previous session)_";
+
+          const keyboard = q.options.map((opt, oi) => [
+            {
+              text: opt.label,
+              callback_data: `qa:${questionId}:${qi}:${oi}`,
+            },
+          ]);
+          keyboard.push([
+            { text: "Dismiss", callback_data: `qa_reject:${questionId}` },
+          ]);
+
+          try {
+            await bot.telegram.sendMessage(numericChatId, msg, {
+              parse_mode: "Markdown",
+              reply_markup: { inline_keyboard: keyboard },
+            });
+          } catch (err) {
+            console.warn(`[Telegram] Failed to re-send question to chat ${chatId}:`, err);
+          }
+        }
+        console.log(
+          `[Telegram] Re-forwarded pending question ${questionId} to chat ${chatId}`
+        );
+      }
+    }
+  } catch (err) {
+    console.warn("[Telegram] Failed to check for pending questions:", err);
+  }
+
   if (options.launch !== false) {
     try {
       // Start the bot — launch() returns a promise that resolves only
       // when polling stops, so we log before awaiting it.
       console.log("[Telegram] Bot is running (long-polling started)");
-      await bot.launch();
+      await bot.launch({ dropPendingUpdates: true });
 
       // Enable graceful stop
       process.once("SIGINT", () => bot.stop("SIGINT"));

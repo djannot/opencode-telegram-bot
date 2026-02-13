@@ -92,7 +92,7 @@ describe("Telegram bot", () => {
         create: vi.fn(async () => ({ data: { id: sessionId }, error: undefined })),
         update: vi.fn(async () => ({ data: {}, error: undefined })),
         messages: vi.fn(async (options: any) => {
-          if (options?.path?.id !== subagentSessionId) {
+          if (options?.sessionID !== subagentSessionId) {
             return { data: [], error: undefined };
           }
           return {
@@ -203,6 +203,8 @@ describe("Telegram bot", () => {
 
     await dispatchText("/verbose on");
     await dispatchText("Hello");
+    // sendPromptStreaming runs detached; wait for it to complete
+    await new Promise((r) => setTimeout(r, 50));
 
     const texts = sentMessages.map((m) => m.text);
     expect(texts.join("\n")).toContain("🧠 Thinking (agent: search):");
@@ -285,6 +287,8 @@ describe("Telegram bot", () => {
     });
 
     await dispatchText("Hello");
+    // sendPromptStreaming runs detached; wait for it to complete
+    await new Promise((r) => setTimeout(r, 50));
     const texts = sentMessages.map((m) => m.text);
     expect(texts.join("\n")).not.toContain("Thinking:");
     expect(texts.join("\n")).not.toContain("⚙️");
@@ -350,7 +354,7 @@ describe("Telegram bot", () => {
     await dispatchText("Hello");
 
     const call = (promptAsync as any).mock.calls.at(-1)?.[0];
-    expect(call?.body?.model).toEqual({ providerID: "openai", modelID: "gpt-5.2-codex" });
+    expect(call?.model).toEqual({ providerID: "openai", modelID: "gpt-5.2-codex" });
   });
 
   it("renders model search results with inline buttons", async () => {
@@ -563,7 +567,7 @@ describe("Telegram bot", () => {
     });
 
     const call = (promptAsync as any).mock.calls.at(-1)?.[0];
-    const parts = call?.body?.parts || [];
+    const parts = call?.parts || [];
     expect(parts).toEqual([
       { type: "text", text: "Please summarize" },
       {
@@ -612,7 +616,7 @@ describe("Telegram bot", () => {
     });
 
     const call = (promptAsync as any).mock.calls.at(-1)?.[0];
-    const parts = call?.body?.parts || [];
+    const parts = call?.parts || [];
     expect(parts).toEqual([
       {
         type: "file",
@@ -671,7 +675,7 @@ describe("Telegram bot", () => {
     });
 
     const call = (promptAsync as any).mock.calls.at(-1)?.[0];
-    const parts = call?.body?.parts || [];
+    const parts = call?.parts || [];
     expect(parts[0]).toEqual({ type: "text", text: "Summarize" });
     expect(parts[1].type).toBe("text");
     expect(parts[1].text).toContain("File: notes.md");
