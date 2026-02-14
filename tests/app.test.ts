@@ -804,12 +804,14 @@ describe("Telegram bot", () => {
     const lastMessage = sentMessages.at(-1);
     const keyboard = (lastMessage?.options as any)?.reply_markup?.inline_keyboard;
     expect(Array.isArray(keyboard)).toBe(true);
-    expect(keyboard.length).toBe(1);
+    expect(keyboard.length).toBe(2);
     expect(keyboard[0][0].callback_data).toBe("switch:ses_b");
     expect(keyboard[0][1].callback_data).toBe("delete:ses_b");
+    // Last row is always "Show all sessions"
+    expect(keyboard[1][0].callback_data).toBe("sessions:all");
   });
 
-  it("shows only-session message without buttons", async () => {
+  it("shows only-session message with Show all sessions button", async () => {
     const sessionsFilePath = createTempSessionsFile();
     const { bot, dispatchText, sentMessages } = createMockBot();
 
@@ -842,7 +844,9 @@ describe("Telegram bot", () => {
     expect(lastMessage?.text).toContain("Current session: Only");
     expect(lastMessage?.text).toContain("only session");
     const keyboard = (lastMessage?.options as any)?.reply_markup?.inline_keyboard;
-    expect(keyboard).toBeUndefined();
+    expect(keyboard).toBeDefined();
+    expect(keyboard.length).toBe(1);
+    expect(keyboard[0][0].callback_data).toBe("sessions:all");
   });
 
   it("switches sessions via inline button", async () => {
@@ -924,6 +928,165 @@ describe("Telegram bot", () => {
     expect(data.known).toEqual(["ses_a"]);
     expect(deleteMock).toHaveBeenCalled();
     expect(editedMessages.at(-1)?.text).toContain("Deleted session: Second");
+  });
+
+  it("shows external sessions via 'Show all sessions' button", async () => {
+    const sessionsFilePath = createTempSessionsFile();
+    const { bot, dispatchText, dispatchCallbackQuery, sentMessages } = createMockBot();
+
+    const client = createMockClient({
+      session: {
+        list: vi.fn(async () => ({
+          data: [
+            { id: "ses_a", title: "Bot Session", time: { updated: 2 } },
+            { id: "ses_ext", title: "TUI Session", time: { updated: 3 } },
+          ],
+          error: undefined,
+        })),
+      },
+    });
+
+    const initial = {
+      active: { "1": "ses_a" },
+      known: ["ses_a"],
+      verbose: [],
+    };
+    writeFileSync(sessionsFilePath, JSON.stringify(initial));
+
+    await startTelegram({
+      url: "http://localhost:4096",
+      launch: false,
+      client,
+      botFactory: () => bot as any,
+      sessionsFilePath,
+    });
+
+    await dispatchText("/sessions");
+    await dispatchCallbackQuery({ data: "sessions:all" });
+
+    const lastMessage = sentMessages.at(-1);
+    expect(lastMessage?.text).toContain("Sessions created outside this bot");
+    const keyboard = (lastMessage?.options as any)?.reply_markup?.inline_keyboard;
+    expect(keyboard.length).toBe(1);
+    expect(keyboard[0][0].callback_data).toBe("adopt:ses_ext");
+    expect(keyboard[0][0].text).toBe("TUI Session");
+  });
+
+  it("shows no-other-sessions message when all are known", async () => {
+    const sessionsFilePath = createTempSessionsFile();
+    const { bot, dispatchText, dispatchCallbackQuery, sentMessages } = createMockBot();
+
+    const client = createMockClient({
+      session: {
+        list: vi.fn(async () => ({
+          data: [
+            { id: "ses_a", title: "Bot Session", time: { updated: 2 } },
+          ],
+          error: undefined,
+        })),
+      },
+    });
+
+    const initial = {
+      active: { "1": "ses_a" },
+      known: ["ses_a"],
+      verbose: [],
+    };
+    writeFileSync(sessionsFilePath, JSON.stringify(initial));
+
+    await startTelegram({
+      url: "http://localhost:4096",
+      launch: false,
+      client,
+      botFactory: () => bot as any,
+      sessionsFilePath,
+    });
+
+    await dispatchText("/sessions");
+    await dispatchCallbackQuery({ data: "sessions:all" });
+
+    const lastMessage = sentMessages.at(-1);
+    expect(lastMessage?.text).toContain("No other sessions found");
+  });
+
+  it("adopts and switches to an external session", async () => {
+    const sessionsFilePath = createTempSessionsFile();
+    const { bot, dispatchCallbackQuery, sentMessages } = createMockBot();
+
+    const client = createMockClient({
+      session: {
+        list: vi.fn(async () => ({
+          data: [
+            { id: "ses_a", title: "Bot Session", time: { updated: 2 } },
+            { id: "ses_ext", title: "TUI Session", time: { updated: 3 } },
+          ],
+          error: undefined,
+        })),
+      },
+    });
+
+    const initial = {
+      active: { "1": "ses_a" },
+      known: ["ses_a"],
+      verbose: [],
+    };
+    writeFileSync(sessionsFilePath, JSON.stringify(initial));
+
+    await startTelegram({
+      url: "http://localhost:4096",
+      launch: false,
+      client,
+      botFactory: () => bot as any,
+      sessionsFilePath,
+    });
+
+    await dispatchCallbackQuery({ data: "adopt:ses_ext" });
+
+    // Should confirm adoption
+    const lastMessage = sentMessages.at(-1);
+    expect(lastMessage?.text).toContain("Adopted and switched to session: TUI Session");
+
+    // Should persist to sessions file
+    const data = JSON.parse(readFileSync(sessionsFilePath, "utf-8"));
+    expect(data.active["1"]).toBe("ses_ext");
+    expect(data.known).toContain("ses_ext");
+  });
+
+  it("handles adopt of a deleted session gracefully", async () => {
+    const sessionsFilePath = createTempSessionsFile();
+    const { bot, dispatchCallbackQuery, editedMessages } = createMockBot();
+
+    const client = createMockClient({
+      session: {
+        list: vi.fn(async () => ({
+          data: [
+            { id: "ses_a", title: "Bot Session", time: { updated: 2 } },
+          ],
+          error: undefined,
+        })),
+      },
+    });
+
+    const initial = {
+      active: { "1": "ses_a" },
+      known: ["ses_a"],
+      verbose: [],
+    };
+    writeFileSync(sessionsFilePath, JSON.stringify(initial));
+
+    await startTelegram({
+      url: "http://localhost:4096",
+      launch: false,
+      client,
+      botFactory: () => bot as any,
+      sessionsFilePath,
+    });
+
+    // Try to adopt a session that no longer exists
+    await dispatchCallbackQuery({ data: "adopt:ses_gone" });
+
+    const lastEdited = editedMessages.at(-1);
+    expect(lastEdited?.text).toContain("Session not found");
   });
 
   it("renames sessions with /title", async () => {

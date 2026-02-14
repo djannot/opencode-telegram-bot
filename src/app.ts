@@ -1236,7 +1236,7 @@ export async function startTelegram(options: StartOptions) {
     );
   });
 
-  type SessionListItem = { id: string; title: string; time: { updated: number } };
+  type SessionListItem = { id: string; title: string; parentID?: string; time: { updated: number } };
 
   /**
    * Get the list of known sessions, sorted by most recently updated.
@@ -1269,7 +1269,13 @@ export async function startTelegram(options: StartOptions) {
       const sessions = await getKnownSessions();
 
       if (sessions.length === 0) {
-        await ctx.reply("No sessions found.");
+        await ctx.reply("No sessions found.\n\nYou can discover sessions created outside this bot:", {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "Show all sessions", callback_data: "sessions:all" }],
+            ],
+          },
+        });
         return;
       }
 
@@ -1282,27 +1288,35 @@ export async function startTelegram(options: StartOptions) {
       const otherSessions = sessions.filter(
         (session) => session.id !== activeSessionId
       );
-      if (otherSessions.length === 0) {
-        msgLines.push("This is your only session.");
-        await ctx.reply(msgLines.join("\n"));
-        return;
-      }
-
-      msgLines.push("Tap a session to switch or delete.");
 
       const keyboard: Array<Array<{ text: string; callback_data: string }>> = [];
-      otherSessions.forEach((session) => {
-        keyboard.push([
-          {
-            text: session.title,
-            callback_data: `switch:${session.id}`,
-          },
-          {
-            text: "Delete",
-            callback_data: `delete:${session.id}`,
-          },
-        ]);
-      });
+
+      if (otherSessions.length > 0) {
+        msgLines.push("Tap a session to switch or delete.");
+        otherSessions.forEach((session) => {
+          keyboard.push([
+            {
+              text: session.title,
+              callback_data: `switch:${session.id}`,
+            },
+            {
+              text: "Delete",
+              callback_data: `delete:${session.id}`,
+            },
+          ]);
+        });
+      } else {
+        msgLines.push("This is your only session.");
+      }
+
+      // Always show "Show all sessions" button to discover sessions
+      // created outside the Telegram bot (e.g. via opencode TUI)
+      keyboard.push([
+        {
+          text: "Show all sessions",
+          callback_data: "sessions:all",
+        },
+      ]);
 
       await ctx.reply(msgLines.join("\n"), {
         reply_markup: {
@@ -1503,6 +1517,89 @@ export async function startTelegram(options: StartOptions) {
     } catch (err) {
       console.error("[Telegram] Error deleting session:", err);
       await answerAndEdit(ctx, "Failed to delete session.");
+    }
+  });
+
+  // Handle "Show all sessions" button - list sessions not tracked by the bot
+  bot.action("sessions:all", async (ctx) => {
+    const chatId = getChatIdFromContext(ctx);
+    if (!chatId) return;
+
+    try {
+      // Delete the button message
+      try {
+        await ctx.deleteMessage();
+      } catch {
+        // Ignore if already deleted
+      }
+      await ctx.answerCbQuery();
+
+      const list = await client.session.list({});
+      const allSessions = ((list.data || []) as SessionListItem[])
+        .filter((s: SessionListItem) => !knownSessionIds.has(s.id) && !s.parentID)
+        .sort((a: SessionListItem, b: SessionListItem) => b.time.updated - a.time.updated);
+
+      if (allSessions.length === 0) {
+        await ctx.reply("No other sessions found.");
+        return;
+      }
+
+      const keyboard: Array<Array<{ text: string; callback_data: string }>> = [];
+      allSessions.forEach((session) => {
+        keyboard.push([
+          {
+            text: session.title,
+            callback_data: `adopt:${session.id}`,
+          },
+        ]);
+      });
+
+      await ctx.reply("Sessions created outside this bot.\nTap to adopt and switch:", {
+        reply_markup: {
+          inline_keyboard: keyboard,
+        },
+      });
+    } catch (err) {
+      console.error("[Telegram] Error listing all sessions:", err);
+      await ctx.reply("Failed to list sessions.");
+    }
+  });
+
+  // Handle adopt button - adopt an external session and switch to it
+  bot.action(/^adopt:(.+)$/, async (ctx) => {
+    const chatId = getChatIdFromContext(ctx);
+    const sessionId = ctx.match?.[1];
+    if (!chatId || !sessionId) return;
+
+    try {
+      // Verify the session still exists on the server
+      const list = await client.session.list({});
+      const allSessions = (list.data || []) as SessionListItem[];
+      const match = allSessions.find((s: SessionListItem) => s.id === sessionId);
+
+      if (!match) {
+        await answerAndEdit(ctx, "Session not found. It may have been deleted.");
+        return;
+      }
+
+      // Delete the button message
+      try {
+        await ctx.deleteMessage();
+      } catch {
+        // Ignore if already deleted
+      }
+      await ctx.answerCbQuery();
+
+      // Adopt: add to known sessions and switch to it
+      knownSessionIds.add(match.id);
+      chatSessions.set(chatId, match.id);
+      saveSessions();
+
+      console.log(`[Telegram] Adopted and switched chat ${chatId} to session ${match.id}`);
+      await ctx.reply(`Adopted and switched to session: ${match.title}`);
+    } catch (err) {
+      console.error("[Telegram] Error adopting session:", err);
+      await answerAndEdit(ctx, "Failed to adopt session.");
     }
   });
 

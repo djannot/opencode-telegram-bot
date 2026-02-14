@@ -180,6 +180,9 @@ export function createMockBot() {
         from: { id: userId },
       },
       answerCbQuery: vi.fn(async () => {}),
+      deleteMessage: vi.fn(async () => {
+        deletedMessages.push({ chatId, messageId: messageIdToEdit });
+      }),
       editMessageText: vi.fn(async (text: string, options?: Record<string, unknown>) => {
         editedMessages.push({ chatId, text, options });
       }),

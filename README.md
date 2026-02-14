@@ -280,7 +280,7 @@ You:  [tap "Auth refactoring"]
 Bot:  Switched to session: Auth refactoring
 ```
 
-The `/sessions` list only shows sessions created by the Telegram bot, not sessions from other OpenCode clients (like the TUI). You cannot delete the currently active session -- use `/new` first.
+The `/sessions` list shows sessions created by the Telegram bot. At the bottom of the list, a **"Show all sessions"** button lets you discover sessions created by other OpenCode clients (like the TUI via `opencode attach`). Tapping an external session adopts it and switches to it. You cannot delete the currently active session -- use `/new` first.
 
 ## Session Persistence
 
