@@ -401,7 +401,7 @@ describe("Telegram bot", () => {
 
   it("switches models via inline button", async () => {
     const sessionsFilePath = createTempSessionsFile();
-    const { bot, dispatchText, dispatchCallbackQuery, editedMessages } = createMockBot();
+    const { bot, dispatchText, dispatchCallbackQuery, sentMessages } = createMockBot();
 
     const client = createMockClient({
       provider: {
@@ -437,7 +437,9 @@ describe("Telegram bot", () => {
 
     const data = JSON.parse(readFileSync(sessionsFilePath, "utf-8"));
     expect(data.models?.["1"]).toBe("openai/gpt-5.2-codex");
-    expect(editedMessages.at(-1)?.text).toContain("Switched to gpt-5.2-codex");
+    // The button message is deleted; the pinned status message confirms the change
+    const statusText = sentMessages.map((m) => m.text).join("\n");
+    expect(statusText).toContain("gpt-5.2-codex");
   });
 
   it("resets model override with /model default", async () => {
@@ -1031,5 +1033,133 @@ describe("Telegram bot", () => {
     const text = sentMessages.map((m) => m.text).join("\n");
     expect(text).toContain("/verbose");
     expect(text).toContain("/verbose on|off");
+    expect(text).toContain("/agent");
+  });
+
+  it("shows current agent and available agents with /agent", async () => {
+    const sessionsFilePath = createTempSessionsFile();
+    const { bot, dispatchText, sentMessages } = createMockBot();
+    const client = createMockClient();
+
+    await startTelegram({
+      url: "http://localhost:4096",
+      launch: false,
+      client,
+      botFactory: () => bot as any,
+      sessionsFilePath,
+    });
+
+    await dispatchText("/agent");
+
+    const text = sentMessages.map((m) => m.text).join("\n");
+    expect(text).toContain("Current agent: *build*");
+    expect(text).toContain("build");
+    expect(text).toContain("plan");
+    expect(text).toContain("general");
+    expect(text).toContain("explore");
+
+    // Should have inline buttons
+    const lastMsg = sentMessages[sentMessages.length - 1];
+    const keyboard = (lastMsg.options as any)?.reply_markup?.inline_keyboard;
+    expect(keyboard).toBeDefined();
+    const allButtons = keyboard.flat();
+    expect(allButtons.some((b: any) => b.callback_data === "agent:plan")).toBe(true);
+    expect(allButtons.some((b: any) => b.callback_data === "agent:build")).toBe(true);
+  });
+
+  it("switches agents via /agent <name>", async () => {
+    const sessionsFilePath = createTempSessionsFile();
+    const promptAsync = vi.fn(async () => ({ data: undefined, error: undefined }));
+    const { bot, dispatchText, sentMessages } = createMockBot();
+    const client = createMockClient({
+      session: { promptAsync },
+    });
+
+    await startTelegram({
+      url: "http://localhost:4096",
+      launch: false,
+      client,
+      botFactory: () => bot as any,
+      sessionsFilePath,
+    });
+
+    await dispatchText("/agent plan");
+
+    const text = sentMessages.map((m) => m.text).join("\n");
+    expect(text).toContain("Agent: *plan*");
+
+    // Verify the agent is passed in the next prompt
+    await dispatchText("Hello");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const call = (promptAsync as any).mock.calls.at(-1)?.[0];
+    expect(call?.agent).toBe("plan");
+  });
+
+  it("switches agents via inline button", async () => {
+    const sessionsFilePath = createTempSessionsFile();
+    const promptAsync = vi.fn(async () => ({ data: undefined, error: undefined }));
+    const { bot, dispatchText, dispatchCallbackQuery, sentMessages } = createMockBot();
+    const client = createMockClient({
+      session: { promptAsync },
+    });
+
+    await startTelegram({
+      url: "http://localhost:4096",
+      launch: false,
+      client,
+      botFactory: () => bot as any,
+      sessionsFilePath,
+    });
+
+    await dispatchCallbackQuery({ data: "agent:plan" });
+
+    const text = sentMessages.map((m) => m.text).join("\n");
+    // The callback edits the message inline; a pinned status message is also sent
+    expect(text).toContain("Agent: *plan*");
+
+    // Verify the agent is used in next prompt
+    await dispatchText("Hello");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const call = (promptAsync as any).mock.calls.at(-1)?.[0];
+    expect(call?.agent).toBe("plan");
+  });
+
+  it("persists agent override across restarts", async () => {
+    const sessionsFilePath = createTempSessionsFile();
+    const { bot: bot1, dispatchText: dt1 } = createMockBot();
+    const client1 = createMockClient();
+
+    await startTelegram({
+      url: "http://localhost:4096",
+      launch: false,
+      client: client1,
+      botFactory: () => bot1 as any,
+      sessionsFilePath,
+    });
+
+    await dt1("/agent plan");
+
+    // Restart with same sessions file
+    const promptAsync2 = vi.fn(async () => ({ data: undefined, error: undefined }));
+    const { bot: bot2, dispatchText: dt2 } = createMockBot();
+    const client2 = createMockClient({
+      session: { promptAsync: promptAsync2 },
+    });
+
+    await startTelegram({
+      url: "http://localhost:4096",
+      launch: false,
+      client: client2,
+      botFactory: () => bot2 as any,
+      sessionsFilePath,
+    });
+
+    await dt2("Hello");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const call = (promptAsync2 as any).mock.calls.at(-1)?.[0];
+    expect(call?.agent).toBe("plan");
   });
 });

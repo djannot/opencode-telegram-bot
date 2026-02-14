@@ -112,6 +112,8 @@ These are handled directly by the Telegram bot:
 | `/model` | Show current model and usage hints |
 | `/model <keyword>` | Search models by keyword |
 | `/model default` | Reset to the default model |
+| `/agent` | Show current agent and switch (plan, build, ...) |
+| `/agent <name>` | Switch directly to a named agent |
 | `/usage` | Show token and cost usage for this session |
 | `/help` | Show available commands |
 
@@ -176,6 +178,33 @@ Other commands:
 
 - `/model` shows the current model and usage hints
 - `/model default` resets to the server default
+
+### Agent Switching
+
+OpenCode supports multiple agents: **build** (default, full edit access), **plan** (read-only analysis), and others. Use `/agent` to see and switch between them:
+
+```
+You:  /agent
+Bot:  Current agent: build
+
+      Available agents:
+      - build (active) -- The default agent
+      - plan -- Plan mode. Disallows all edit tools.
+      - general -- General-purpose agent
+      - explore -- Codebase explorer
+
+      [build]  [plan]  [general]  [explore]
+
+You:  [tap "plan"]
+      (button message is deleted)
+Bot:  Agent: plan | Model: claude-opus-4 | Verbose: off     [pinned]
+```
+
+### Pinned Status Message
+
+A pinned message at the top of the chat shows the current agent, model, and verbose mode. It updates automatically when any of these change — via `/agent`, `/model`, or `/verbose`. The pinned message is the only confirmation; no separate reply is sent.
+
+Agent, model, and verbose selections are per-chat and persist across bot restarts.
 
 ## Usage
 

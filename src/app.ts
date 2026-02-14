@@ -37,6 +37,9 @@ interface OpencodeClientLike {
     reply: (params: any, options?: any) => Promise<any>;
     reject: (params: any, options?: any) => Promise<any>;
   };
+  app: {
+    agents: (params?: any, options?: any) => Promise<any>;
+  };
 }
 
 type PromptPartInput =
@@ -63,11 +66,14 @@ interface TelegramBot {
   launch: (options?: { dropPendingUpdates?: boolean }) => Promise<void>;
   stop: (reason?: string) => void;
   telegram: {
-    sendMessage: (chatId: number, text: string, options?: Record<string, unknown>) => Promise<void>;
+    sendMessage: (chatId: number, text: string, options?: Record<string, unknown>) => Promise<any>;
     deleteMessage: (chatId: number, messageId: number) => Promise<void>;
     sendDocument: (chatId: number, file: { source: Buffer; filename: string }) => Promise<void>;
     getFileLink: (fileId: string) => Promise<{ toString(): string }>;
     setMyCommands: (commands: Array<{ command: string; description: string }>) => Promise<unknown>;
+    pinChatMessage: (chatId: number, messageId: number, extra?: Record<string, unknown>) => Promise<void>;
+    unpinChatMessage: (chatId: number, messageId?: number) => Promise<void>;
+    editMessageText: (chatId: number | undefined, messageId: number | undefined, inlineMessageId: string | undefined, text: string, extra?: Record<string, unknown>) => Promise<void>;
   };
 }
 
@@ -100,6 +106,9 @@ export async function startTelegram(options: StartOptions) {
 
   // Initialize OpenCode client
   const client = options.client || createOpencodeClient({ baseUrl: url });
+
+  // Available agents fetched from OpenCode on startup
+  let availableAgents: Array<{ name: string; description: string; mode: string }> = [];
 
   // Verify connection to the OpenCode server and fetch available commands
   const opencodeCommands = new Set<string>();
@@ -142,6 +151,21 @@ export async function startTelegram(options: StartOptions) {
         `[Telegram] Available OpenCode commands: ${[...opencodeCommands].join(", ")}`
       );
     }
+
+    // Fetch available agents
+    const agentsResult = await client.app.agents({});
+    if (agentsResult.data) {
+      availableAgents = (agentsResult.data as Array<{ name: string; description?: string; mode?: string; hidden?: boolean }>)
+        .filter((a) => !a.hidden)
+        .map((a) => ({
+          name: a.name,
+          description: a.description || "",
+          mode: a.mode || "primary",
+        }));
+      console.log(
+        `[Telegram] Available agents: ${availableAgents.map((a) => `${a.name} (${a.mode})`).join(", ")}`
+      );
+    }
   } catch (err) {
     throw new Error(
       `[Telegram] Failed to connect to OpenCode server at ${url}. Make sure it's running (npm run serve). Error: ${err}`
@@ -150,7 +174,7 @@ export async function startTelegram(options: StartOptions) {
 
   // Telegram-only commands that should not be forwarded to OpenCode
   const telegramCommands = new Set([
-    "start", "help", "new", "sessions", "switch", "title", "delete", "export", "verbose", "model", "usage",
+    "start", "help", "new", "sessions", "switch", "title", "delete", "export", "verbose", "model", "usage", "agent",
   ]);
 
   const telegramCommandMenu: Array<{ command: string; description: string }> = [
@@ -160,6 +184,7 @@ export async function startTelegram(options: StartOptions) {
     { command: "export", description: "Export session (/export full for details)" },
     { command: "verbose", description: "Toggle verbose mode" },
     { command: "model", description: "Search models (/model <keyword>)" },
+    { command: "agent", description: "Switch agent (plan, build, ...)" },
     { command: "usage", description: "Show token and cost usage" },
     { command: "help", description: "Show available commands" },
   ];
@@ -175,6 +200,11 @@ export async function startTelegram(options: StartOptions) {
   const chatVerboseMode = new Set<string>();
   // Map of chatId -> model override (provider/model)
   const chatModelOverride = new Map<string, string>();
+  // Map of chatId -> agent override (e.g. "plan", "build")
+  const chatAgentOverride = new Map<string, string>();
+  // Map of chatId -> pinned status message ID
+  const chatPinnedStatusMsg = new Map<string, number>();
+
   // Map of chatId -> last search results (in-memory only)
   const chatModelSearchResults = new Map<
     string,
@@ -205,6 +235,8 @@ export async function startTelegram(options: StartOptions) {
         known: [...knownSessionIds],
         verbose: [...chatVerboseMode],
         models: Object.fromEntries(chatModelOverride),
+        agents: Object.fromEntries(chatAgentOverride),
+        pinnedStatus: Object.fromEntries(chatPinnedStatusMsg),
       };
       writeFileSync(sessionsFile, JSON.stringify(data, null, 2));
     } catch (err) {
@@ -222,6 +254,8 @@ export async function startTelegram(options: StartOptions) {
     let storedKnown: string[] = [];
     let storedVerbose: string[] = [];
     let storedModels: Record<string, string> = {};
+    let storedAgents: Record<string, string> = {};
+    let storedPinnedStatus: Record<string, number> = {};
     if (existsSync(sessionsFile)) {
       try {
         const raw = readFileSync(sessionsFile, "utf-8");
@@ -232,6 +266,8 @@ export async function startTelegram(options: StartOptions) {
           storedKnown = parsed.known || [];
           storedVerbose = parsed.verbose || [];
           storedModels = parsed.models || {};
+          storedAgents = parsed.agents || {};
+          storedPinnedStatus = parsed.pinnedStatus || {};
         } else {
           // Old format: flat { chatId: sessionId }
           storedActive = parsed;
@@ -258,6 +294,20 @@ export async function startTelegram(options: StartOptions) {
     for (const [chatId, modelId] of Object.entries(storedModels)) {
       if (modelId) {
         chatModelOverride.set(chatId, modelId);
+      }
+    }
+
+    // Restore agent overrides
+    for (const [chatId, agentName] of Object.entries(storedAgents)) {
+      if (agentName) {
+        chatAgentOverride.set(chatId, agentName);
+      }
+    }
+
+    // Restore pinned status message IDs
+    for (const [chatId, msgId] of Object.entries(storedPinnedStatus)) {
+      if (msgId) {
+        chatPinnedStatusMsg.set(chatId, msgId);
       }
     }
 
@@ -400,6 +450,7 @@ export async function startTelegram(options: StartOptions) {
     const promptBody: {
       parts: PromptPartInput[];
       model?: { providerID: string; modelID: string };
+      agent?: string;
     } = { parts };
 
     const modelOverride = chatModelOverride.get(chatId) || model;
@@ -407,6 +458,11 @@ export async function startTelegram(options: StartOptions) {
       const [providerID, ...modelParts] = modelOverride.split("/");
       const modelID = modelParts.join("/");
       promptBody.model = { providerID, modelID };
+    }
+
+    const agentOverride = chatAgentOverride.get(chatId);
+    if (agentOverride) {
+      promptBody.agent = agentOverride;
     }
 
     return promptBody;
@@ -1095,7 +1151,13 @@ export async function startTelegram(options: StartOptions) {
       return next();
     }
 
-    const userId = ctx.from?.id.toString();
+    // Skip auth for service messages without a sender or from the bot itself
+    // (e.g. pin notifications where ctx.from is the bot)
+    if (!ctx.from || ctx.from.is_bot) {
+      return next();
+    }
+
+    const userId = ctx.from.id.toString();
     if (userId === authorizedUserId) {
       return next();
     } else {
@@ -1122,6 +1184,7 @@ export async function startTelegram(options: StartOptions) {
       "/verbose - Toggle verbose mode (show thinking and tool calls)\n" +
       "/verbose on|off - Set verbose mode explicitly\n" +
       "/model <keyword> - Search available models\n" +
+      "/agent - Switch agent (plan, build, ...)\n" +
       "/usage - Show token and cost usage for this session\n" +
       "/help - Show this help message\n";
 
@@ -1148,6 +1211,7 @@ export async function startTelegram(options: StartOptions) {
       "/verbose - Toggle verbose mode (show thinking and tool calls)\n" +
       "/verbose on|off - Set verbose mode explicitly\n" +
       "/model <keyword> - Search available models\n" +
+      "/agent - Switch agent (plan, build, ...)\n" +
       "/usage - Show token and cost usage for this session\n" +
       "/help - Show this help message\n";
 
@@ -1463,11 +1527,7 @@ export async function startTelegram(options: StartOptions) {
     saveSessions();
     const enabled = chatVerboseMode.has(chatId);
     console.log(`[Telegram] Verbose mode ${enabled ? "enabled" : "disabled"} for chat ${chatId}`);
-    ctx.reply(
-      enabled
-        ? "Verbose mode enabled. Responses will include thinking and tool calls."
-        : "Verbose mode disabled. Responses will only show the assistant's text."
-    );
+    updatePinnedStatus(chatId, ctx.chat.id);
   });
 
   /**
@@ -1584,7 +1644,9 @@ export async function startTelegram(options: StartOptions) {
     const value = `${selection.providerID}/${selection.modelID}`;
     chatModelOverride.set(chatId, value);
     saveSessions();
-    await answerAndEdit(ctx, `Switched to ${selection.displayName}`);
+    try { await ctx.answerCbQuery(); } catch { /* ignore */ }
+    try { await ctx.deleteMessage(); } catch { /* ignore */ }
+    updatePinnedStatus(chatId, Number(chatId));
   });
 
   bot.action("model_default", async (ctx) => {
@@ -1592,7 +1654,147 @@ export async function startTelegram(options: StartOptions) {
     if (!chatId) return;
     chatModelOverride.delete(chatId);
     saveSessions();
-    await answerAndEdit(ctx, "Model reset to the default model.");
+    try { await ctx.answerCbQuery(); } catch { /* ignore */ }
+    try { await ctx.deleteMessage(); } catch { /* ignore */ }
+    updatePinnedStatus(chatId, Number(chatId));
+  });
+
+  // --- Agent switching and pinned status message ---
+
+  function getActiveAgent(chatId: string): string {
+    return chatAgentOverride.get(chatId) || "build";
+  }
+
+  function getActiveModelDisplay(chatId: string): string {
+    const m = chatModelOverride.get(chatId) || model;
+    if (!m) return "default";
+    const parts = m.split("/");
+    return parts.length > 1 ? parts.slice(1).join("/") : m;
+  }
+
+  function buildStatusText(chatId: string): string {
+    const agent = getActiveAgent(chatId);
+    const modelDisplay = getActiveModelDisplay(chatId);
+    const verbose = chatVerboseMode.has(chatId) ? "on" : "off";
+    return `Agent: *${agent}* | Model: ${modelDisplay} | Verbose: ${verbose}`;
+  }
+
+  function buildStatusKeyboard(chatId: string) {
+    const active = getActiveAgent(chatId);
+    // Show non-hidden agents as buttons, highlight the active one
+    const buttons = availableAgents
+      .filter((a) => a.mode === "primary" || a.mode === "subagent")
+      .map((a) => ({
+        text: a.name === active ? `[${a.name}]` : a.name,
+        callback_data: `agent:${a.name}`,
+      }));
+    // Arrange in rows of 3
+    const keyboard: Array<Array<{ text: string; callback_data: string }>> = [];
+    for (let i = 0; i < buttons.length; i += 3) {
+      keyboard.push(buttons.slice(i, i + 3));
+    }
+    return keyboard;
+  }
+
+  async function updatePinnedStatus(chatId: string, numericChatId: number) {
+    const text = buildStatusText(chatId);
+
+    // Delete the old status message to keep the chat clean
+    const existingMsgId = chatPinnedStatusMsg.get(chatId);
+    if (existingMsgId) {
+      try {
+        await bot.telegram.deleteMessage(numericChatId, existingMsgId);
+      } catch {
+        // Already deleted
+      }
+      chatPinnedStatusMsg.delete(chatId);
+    }
+
+    // Always send a fresh message and pin it. Editing in place doesn't
+    // refresh the pinned bar on Android, so delete+send+pin is the only
+    // reliable approach. The pinned message itself serves as the
+    // confirmation — no separate reply is needed.
+    try {
+      const msg = await bot.telegram.sendMessage(numericChatId, text, {
+        parse_mode: "Markdown",
+      });
+      const messageId = (msg as any).message_id;
+      if (messageId) {
+        chatPinnedStatusMsg.set(chatId, messageId);
+        saveSessions();
+        try {
+          await bot.telegram.pinChatMessage(numericChatId, messageId, {
+            disable_notification: true,
+          });
+        } catch (pinErr) {
+          console.warn("[Telegram] Failed to pin status message:", pinErr);
+        }
+      }
+    } catch (err) {
+      console.warn("[Telegram] Failed to send status message:", err);
+    }
+  }
+
+  // Handle /agent command
+  bot.command("agent", async (ctx) => {
+    const chatId = ctx.chat.id.toString();
+    const args = (ctx.message?.text || "").replace(/^\/agent\s*/i, "").trim();
+
+    if (!args) {
+      // Show current agent and list available ones
+      const current = getActiveAgent(chatId);
+      let msg = `Current agent: *${current}*\n\nAvailable agents:\n`;
+      for (const a of availableAgents) {
+        const marker = a.name === current ? " (active)" : "";
+        const desc = a.description ? ` -- ${truncate(a.description, 80)}` : "";
+        msg += `- *${a.name}*${marker}${desc}\n`;
+      }
+      msg += "\nTap a button or use `/agent <name>` to switch.";
+
+      const keyboard = buildStatusKeyboard(chatId);
+
+      await ctx.reply(msg, {
+        parse_mode: "Markdown",
+        reply_markup: { inline_keyboard: keyboard },
+      });
+      return;
+    }
+
+    // Direct switch by name
+    const target = args.toLowerCase();
+    const match = availableAgents.find((a) => a.name === target);
+    if (!match) {
+      await ctx.reply(
+        `Unknown agent "${args}". Available: ${availableAgents.map((a) => a.name).join(", ")}`
+      );
+      return;
+    }
+
+    chatAgentOverride.set(chatId, match.name);
+    saveSessions();
+    await updatePinnedStatus(chatId, ctx.chat.id);
+  });
+
+  // Handle agent switch via inline button
+  bot.action(/^agent:(.+)$/, async (ctx) => {
+    const chatId = getChatIdFromContext(ctx);
+    if (!chatId) return;
+
+    const agentName = ctx.match?.[1];
+    if (!agentName) return;
+
+    const match = availableAgents.find((a) => a.name === agentName);
+    if (!match) {
+      await answerAndEdit(ctx, `Unknown agent: ${agentName}`);
+      return;
+    }
+
+    chatAgentOverride.set(chatId, match.name);
+    saveSessions();
+
+    try { await ctx.answerCbQuery(); } catch { /* ignore */ }
+    try { await ctx.deleteMessage(); } catch { /* ignore */ }
+    await updatePinnedStatus(chatId, Number(chatId));
   });
 
   // Handle question answer callback (from OpenCode question.asked events)

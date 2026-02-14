@@ -56,6 +56,7 @@ Unit tests (`tests/app.test.ts`) cover:
 - Session usage reporting with `/usage`
 - File uploads forwarded as file parts
 - Text file uploads are inlined as text parts
+- Agent switching with `/agent` (list, switch by name, inline buttons, persistence)
 - Telegram command menu registration (filters invalid names, truncates descriptions)
 
 Integration test (`tests/integration.test.ts`) covers:

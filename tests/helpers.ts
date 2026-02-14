@@ -33,6 +33,11 @@ export function createMockBot() {
     }),
     getFileLink: vi.fn(async (fileId: string) => new URL(`https://files.test/${fileId}`)),
     setMyCommands: vi.fn(async () => true),
+    pinChatMessage: vi.fn(async () => {}),
+    unpinChatMessage: vi.fn(async () => {}),
+    editMessageText: vi.fn(async (_chatId: number, _messageId: number, _inlineId: string | undefined, text: string, options?: Record<string, unknown>) => {
+      editedMessages.push({ chatId: _chatId, text, options });
+    }),
   };
 
   const bot = {
@@ -261,6 +266,17 @@ export function createMockClient(overrides: Partial<any> = {}) {
       reply: vi.fn(async () => ({ data: {}, error: undefined })),
       reject: vi.fn(async () => ({ data: {}, error: undefined })),
     },
+    app: {
+      agents: vi.fn(async () => ({
+        data: [
+          { name: "build", description: "The default agent", mode: "primary" },
+          { name: "plan", description: "Plan mode", mode: "primary" },
+          { name: "general", description: "General-purpose agent", mode: "subagent" },
+          { name: "explore", description: "Codebase explorer", mode: "subagent" },
+        ],
+        error: undefined,
+      })),
+    },
   };
 
   return {
@@ -271,5 +287,6 @@ export function createMockClient(overrides: Partial<any> = {}) {
     path: { ...base.path, ...(overrides as any).path },
     event: { ...base.event, ...(overrides as any).event },
     question: { ...base.question, ...(overrides as any).question },
+    app: { ...base.app, ...(overrides as any).app },
   };
 }
