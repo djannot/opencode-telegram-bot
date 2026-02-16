@@ -1325,4 +1325,306 @@ describe("Telegram bot", () => {
     const call = (promptAsync2 as any).mock.calls.at(-1)?.[0];
     expect(call?.agent).toBe("plan");
   });
+
+  it("forwards permission.asked events to Telegram with buttons", async () => {
+    const sessionsFilePath = createTempSessionsFile();
+    const { bot, dispatchText, sentMessages } = createMockBot();
+
+    const sessionId = "ses_test";
+    const client = createMockClient({
+      session: {
+        create: vi.fn(async () => ({ data: { id: sessionId }, error: undefined })),
+      },
+      event: {
+        subscribe: vi.fn(async () => ({
+          stream: streamFrom([
+            {
+              type: "permission.asked",
+              properties: {
+                id: "perm_1",
+                sessionID: sessionId,
+                permission: "edit",
+                patterns: ["src/app.ts"],
+                metadata: {},
+                always: ["src/**"],
+              },
+            },
+            { type: "session.idle", properties: { sessionID: sessionId } },
+          ]),
+        })),
+      },
+    });
+
+    await startTelegram({
+      url: "http://localhost:4096",
+      launch: false,
+      client,
+      botFactory: () => bot as any,
+      sessionsFilePath,
+    });
+
+    await dispatchText("Hello");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const permMsg = sentMessages.find((m) => m.text.includes("Permission:"));
+    expect(permMsg).toBeDefined();
+    expect(permMsg?.text).toContain("edit");
+    expect(permMsg?.text).toContain("src/app.ts");
+
+    const keyboard = (permMsg?.options as any)?.reply_markup?.inline_keyboard;
+    expect(keyboard).toBeDefined();
+    expect(keyboard[0][0].callback_data).toBe("perm_once:perm_1");
+    expect(keyboard[0][1].callback_data).toBe("perm_always:perm_1");
+    expect(keyboard[1][0].callback_data).toBe("perm_reject:perm_1");
+  });
+
+  it("replies to permission with 'once' via callback", async () => {
+    const sessionsFilePath = createTempSessionsFile();
+    const { bot, dispatchText, dispatchCallbackQuery, editedMessages } = createMockBot();
+
+    const sessionId = "ses_test";
+    const permReplyMock = vi.fn(async () => ({ data: {}, error: undefined }));
+    const client = createMockClient({
+      session: {
+        create: vi.fn(async () => ({ data: { id: sessionId }, error: undefined })),
+      },
+      permission: {
+        reply: permReplyMock,
+      },
+      event: {
+        subscribe: vi.fn(async () => ({
+          stream: streamFrom([
+            {
+              type: "permission.asked",
+              properties: {
+                id: "perm_2",
+                sessionID: sessionId,
+                permission: "bash",
+                patterns: ["npm test"],
+                metadata: {},
+                always: [],
+              },
+            },
+            { type: "session.idle", properties: { sessionID: sessionId } },
+          ]),
+        })),
+      },
+    });
+
+    await startTelegram({
+      url: "http://localhost:4096",
+      launch: false,
+      client,
+      botFactory: () => bot as any,
+      sessionsFilePath,
+    });
+
+    await dispatchText("Run tests");
+    await new Promise((r) => setTimeout(r, 50));
+
+    await dispatchCallbackQuery({ data: "perm_once:perm_2" });
+
+    expect(permReplyMock).toHaveBeenCalledWith({
+      requestID: "perm_2",
+      reply: "once",
+    });
+    expect(editedMessages.at(-1)?.text).toContain("Allowed (once)");
+  });
+
+  it("replies to permission with 'always' via callback", async () => {
+    const sessionsFilePath = createTempSessionsFile();
+    const { bot, dispatchText, dispatchCallbackQuery, editedMessages } = createMockBot();
+
+    const sessionId = "ses_test";
+    const permReplyMock = vi.fn(async () => ({ data: {}, error: undefined }));
+    const client = createMockClient({
+      session: {
+        create: vi.fn(async () => ({ data: { id: sessionId }, error: undefined })),
+      },
+      permission: {
+        reply: permReplyMock,
+      },
+      event: {
+        subscribe: vi.fn(async () => ({
+          stream: streamFrom([
+            {
+              type: "permission.asked",
+              properties: {
+                id: "perm_3",
+                sessionID: sessionId,
+                permission: "edit",
+                patterns: ["*.ts"],
+                metadata: {},
+                always: ["**/*.ts"],
+              },
+            },
+            { type: "session.idle", properties: { sessionID: sessionId } },
+          ]),
+        })),
+      },
+    });
+
+    await startTelegram({
+      url: "http://localhost:4096",
+      launch: false,
+      client,
+      botFactory: () => bot as any,
+      sessionsFilePath,
+    });
+
+    await dispatchText("Edit files");
+    await new Promise((r) => setTimeout(r, 50));
+
+    await dispatchCallbackQuery({ data: "perm_always:perm_3" });
+
+    expect(permReplyMock).toHaveBeenCalledWith({
+      requestID: "perm_3",
+      reply: "always",
+    });
+    expect(editedMessages.at(-1)?.text).toContain("Always allowed");
+  });
+
+  it("rejects permission via callback", async () => {
+    const sessionsFilePath = createTempSessionsFile();
+    const { bot, dispatchText, dispatchCallbackQuery, editedMessages } = createMockBot();
+
+    const sessionId = "ses_test";
+    const permReplyMock = vi.fn(async () => ({ data: {}, error: undefined }));
+    const client = createMockClient({
+      session: {
+        create: vi.fn(async () => ({ data: { id: sessionId }, error: undefined })),
+      },
+      permission: {
+        reply: permReplyMock,
+      },
+      event: {
+        subscribe: vi.fn(async () => ({
+          stream: streamFrom([
+            {
+              type: "permission.asked",
+              properties: {
+                id: "perm_4",
+                sessionID: sessionId,
+                permission: "bash",
+                patterns: ["rm -rf /"],
+                metadata: {},
+                always: [],
+              },
+            },
+            { type: "session.idle", properties: { sessionID: sessionId } },
+          ]),
+        })),
+      },
+    });
+
+    await startTelegram({
+      url: "http://localhost:4096",
+      launch: false,
+      client,
+      botFactory: () => bot as any,
+      sessionsFilePath,
+    });
+
+    await dispatchText("Delete everything");
+    await new Promise((r) => setTimeout(r, 50));
+
+    await dispatchCallbackQuery({ data: "perm_reject:perm_4" });
+
+    expect(permReplyMock).toHaveBeenCalledWith({
+      requestID: "perm_4",
+      reply: "reject",
+    });
+    expect(editedMessages.at(-1)?.text).toContain("Rejected");
+  });
+
+  it("recovers pending permissions on startup", async () => {
+    const sessionsFilePath = createTempSessionsFile();
+    const { bot, sentMessages } = createMockBot();
+
+    const initial = {
+      active: { "1": "ses_existing" },
+      known: ["ses_existing"],
+      verbose: [],
+    };
+    writeFileSync(sessionsFilePath, JSON.stringify(initial));
+
+    const client = createMockClient({
+      session: {
+        list: vi.fn(async () => ({
+          data: [{ id: "ses_existing", title: "Existing", time: { updated: 1 } }],
+          error: undefined,
+        })),
+      },
+      permission: {
+        list: vi.fn(async () => ({
+          data: [
+            {
+              id: "perm_pending",
+              sessionID: "ses_existing",
+              permission: "edit",
+              patterns: ["README.md"],
+              metadata: {},
+              always: [],
+            },
+          ],
+          error: undefined,
+        })),
+      },
+    });
+
+    await startTelegram({
+      url: "http://localhost:4096",
+      launch: false,
+      client,
+      botFactory: () => bot as any,
+      sessionsFilePath,
+    });
+
+    const permMsg = sentMessages.find((m) => m.text.includes("Permission:"));
+    expect(permMsg).toBeDefined();
+    expect(permMsg?.text).toContain("edit");
+    expect(permMsg?.text).toContain("README.md");
+    expect(permMsg?.text).toContain("resumed");
+
+    const keyboard = (permMsg?.options as any)?.reply_markup?.inline_keyboard;
+    expect(keyboard[0][0].callback_data).toBe("perm_once:perm_pending");
+  });
+
+  it("rejects orphan pending permissions on startup", async () => {
+    const sessionsFilePath = createTempSessionsFile();
+    const { bot } = createMockBot();
+
+    const permReplyMock = vi.fn(async () => ({ data: {}, error: undefined }));
+    const client = createMockClient({
+      permission: {
+        list: vi.fn(async () => ({
+          data: [
+            {
+              id: "perm_orphan",
+              sessionID: "ses_unknown",
+              permission: "bash",
+              patterns: ["ls"],
+              metadata: {},
+              always: [],
+            },
+          ],
+          error: undefined,
+        })),
+        reply: permReplyMock,
+      },
+    });
+
+    await startTelegram({
+      url: "http://localhost:4096",
+      launch: false,
+      client,
+      botFactory: () => bot as any,
+      sessionsFilePath,
+    });
+
+    expect(permReplyMock).toHaveBeenCalledWith({
+      requestID: "perm_orphan",
+      reply: "reject",
+    });
+  });
 });

@@ -58,6 +58,9 @@ Unit tests (`tests/app.test.ts`) cover:
 - File uploads forwarded as file parts
 - Text file uploads are inlined as text parts
 - Agent switching with `/agent` (list, switch by name, inline buttons, persistence)
+- Permission requests forwarded to Telegram with Allow once/Always allow/Reject buttons
+- Permission reply callbacks (once, always, reject)
+- Pending permission recovery on startup (re-send and orphan rejection)
 - Telegram command menu registration (filters invalid names, truncates descriptions)
 
 Integration test (`tests/integration.test.ts`) covers:

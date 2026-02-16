@@ -37,6 +37,10 @@ interface OpencodeClientLike {
     reply: (params: any, options?: any) => Promise<any>;
     reject: (params: any, options?: any) => Promise<any>;
   };
+  permission: {
+    list: (params?: any, options?: any) => Promise<any>;
+    reply: (params: any, options?: any) => Promise<any>;
+  };
   app: {
     agents: (params?: any, options?: any) => Promise<any>;
   };
@@ -222,6 +226,16 @@ export async function startTelegram(options: StartOptions) {
         options: Array<{ label: string; description: string }>;
         multiple: boolean;
       }>;
+    }
+  >();
+  // Map of requestId -> pending permission context (for forwarding OpenCode permission requests to Telegram)
+  const pendingPermissions = new Map<
+    string,
+    {
+      chatId: string;
+      sessionId: string;
+      permission: string;
+      patterns: string[];
     }
   >();
 
@@ -983,6 +997,46 @@ export async function startTelegram(options: StartOptions) {
                   },
                 });
               }
+            }
+          }
+        } else if (ev.type === "permission.asked" && ev.properties) {
+          const permSessionId = ev.properties.sessionID as string | undefined;
+          if (permSessionId === sessionId) {
+            const requestId = ev.properties.id as string;
+            const permission = ev.properties.permission as string;
+            const patterns = (ev.properties.patterns || []) as string[];
+
+            if (requestId) {
+              pendingPermissions.set(requestId, {
+                chatId: chatId.toString(),
+                sessionId,
+                permission,
+                patterns,
+              });
+
+              console.log(`[Telegram] Permission request ${requestId} (${permission}) for chat ${chatId}`);
+
+              let msg = `Permission: *${permission}*`;
+              if (patterns.length > 0) {
+                msg += "\n`" + patterns.join("`, `") + "`";
+              }
+
+              const keyboard = [
+                [
+                  { text: "Allow once", callback_data: `perm_once:${requestId}` },
+                  { text: "Always allow", callback_data: `perm_always:${requestId}` },
+                ],
+                [
+                  { text: "Reject", callback_data: `perm_reject:${requestId}` },
+                ],
+              ];
+
+              await bot.telegram.sendMessage(chatId, msg, {
+                parse_mode: "Markdown",
+                reply_markup: {
+                  inline_keyboard: keyboard,
+                },
+              });
             }
           }
         }
@@ -1968,6 +2022,39 @@ export async function startTelegram(options: StartOptions) {
     }
   });
 
+  // Handle permission reply callbacks (from OpenCode permission.asked events)
+  bot.action(/^perm_(once|always|reject):(.+)$/, async (ctx) => {
+    const action = ctx.match?.[1] as "once" | "always" | "reject";
+    const requestId = ctx.match?.[2];
+    if (!action || !requestId) return;
+
+    console.log(`[Telegram] Permission ${action} callback for ${requestId}`);
+
+    const pending = pendingPermissions.get(requestId);
+    if (!pending) {
+      await answerAndEdit(ctx, "This permission request has expired or was already answered.");
+      return;
+    }
+
+    try {
+      await client.permission.reply({
+        requestID: requestId,
+        reply: action,
+      });
+
+      pendingPermissions.delete(requestId);
+      const labels: Record<string, string> = {
+        once: "Allowed (once)",
+        always: "Always allowed",
+        reject: "Rejected",
+      };
+      await answerAndEdit(ctx, `${labels[action]}: ${pending.permission}`);
+    } catch (err) {
+      console.error("[Telegram] Error replying to permission:", err);
+      await answerAndEdit(ctx, "Failed to respond to permission request.");
+    }
+  });
+
   // Handle /usage command - show token and cost usage for current session
   bot.command("usage", async (ctx) => {
     const chatId = ctx.chat.id.toString();
@@ -2520,6 +2607,73 @@ export async function startTelegram(options: StartOptions) {
     }
   } catch (err) {
     console.warn("[Telegram] Failed to check for pending questions:", err);
+  }
+
+  // Check for pending permission requests left over from previous bot runs.
+  try {
+    const pendingPermResult = await client.permission.list({});
+    if (pendingPermResult.data && pendingPermResult.data.length > 0) {
+      console.log(
+        `[Telegram] Found ${pendingPermResult.data.length} pending permission(s) from previous run`
+      );
+      for (const pp of pendingPermResult.data) {
+        const requestId = pp.id as string;
+        const permSessionId = pp.sessionID as string;
+        const permission = pp.permission as string;
+        const patterns = (pp.patterns || []) as string[];
+        const chatId = sessionToChatId(permSessionId);
+        if (!chatId || !requestId) {
+          // No matching chat — reject the stale permission to unblock the session
+          console.log(
+            `[Telegram] Rejecting orphan pending permission ${requestId} (no matching chat)`
+          );
+          try {
+            await client.permission.reply({ requestID: requestId, reply: "reject" });
+          } catch (err) {
+            console.warn(`[Telegram] Failed to reject orphan permission ${requestId}:`, err);
+          }
+          continue;
+        }
+
+        pendingPermissions.set(requestId, {
+          chatId,
+          sessionId: permSessionId,
+          permission,
+          patterns,
+        });
+
+        const numericChatId = Number(chatId);
+        let msg = `Permission: *${permission}*`;
+        if (patterns.length > 0) {
+          msg += "\n`" + patterns.join("`, `") + "`";
+        }
+        msg += "\n_(resumed from previous session)_";
+
+        const keyboard = [
+          [
+            { text: "Allow once", callback_data: `perm_once:${requestId}` },
+            { text: "Always allow", callback_data: `perm_always:${requestId}` },
+          ],
+          [
+            { text: "Reject", callback_data: `perm_reject:${requestId}` },
+          ],
+        ];
+
+        try {
+          await bot.telegram.sendMessage(numericChatId, msg, {
+            parse_mode: "Markdown",
+            reply_markup: { inline_keyboard: keyboard },
+          });
+        } catch (err) {
+          console.warn(`[Telegram] Failed to re-send permission to chat ${chatId}:`, err);
+        }
+        console.log(
+          `[Telegram] Re-forwarded pending permission ${requestId} to chat ${chatId}`
+        );
+      }
+    }
+  } catch (err) {
+    console.warn("[Telegram] Failed to check for pending permissions:", err);
   }
 
   if (options.launch !== false) {

@@ -269,6 +269,10 @@ export function createMockClient(overrides: Partial<any> = {}) {
       reply: vi.fn(async () => ({ data: {}, error: undefined })),
       reject: vi.fn(async () => ({ data: {}, error: undefined })),
     },
+    permission: {
+      list: vi.fn(async () => ({ data: [], error: undefined })),
+      reply: vi.fn(async () => ({ data: {}, error: undefined })),
+    },
     app: {
       agents: vi.fn(async () => ({
         data: [
@@ -290,6 +294,7 @@ export function createMockClient(overrides: Partial<any> = {}) {
     path: { ...base.path, ...(overrides as any).path },
     event: { ...base.event, ...(overrides as any).event },
     question: { ...base.question, ...(overrides as any).question },
+    permission: { ...base.permission, ...(overrides as any).permission },
     app: { ...base.app, ...(overrides as any).app },
   };
 }

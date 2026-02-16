@@ -131,6 +131,26 @@ You:   [tap "Bug fix"]
 Bot:   Answered: Bug fix
 ```
 
+### Permission Requests
+
+When the OpenCode agent needs permission to perform an action (e.g. edit a file, run a bash command, access an external directory), the bot forwards the request to Telegram with inline buttons:
+
+```
+Bot:   Permission: edit
+       `src/app.ts`
+       [Allow once]  [Always allow]
+       [Reject]
+
+You:   [tap "Allow once"]
+Bot:   Allowed (once): edit
+```
+
+- **Allow once** -- approve this single request
+- **Always allow** -- approve and create a permanent allow rule in OpenCode's config
+- **Reject** -- deny the request
+
+If the bot restarts while a permission request is pending, it automatically re-sends the buttons on startup. Orphan permission requests (from sessions the bot doesn't know about) are automatically rejected to unblock the session.
+
 The bot also registers these commands in Telegram's command menu (the `/` button), plus any OpenCode server commands discovered at startup.
 
 ### Verbose Mode
@@ -299,6 +319,7 @@ The bot is designed to survive restarts and failures:
 
 - **Drop pending updates** -- On startup, stale Telegram updates are discarded so old button clicks and messages from a previous run are not replayed.
 - **Pending question recovery** -- If the bot restarts while the agent is waiting for a question answer, the question is re-sent to Telegram on startup so the session can be unblocked.
+- **Pending permission recovery** -- If the bot restarts while the agent is waiting for a permission approval, the permission request is re-sent to Telegram. Orphan requests (from unknown sessions) are automatically rejected.
 - **Global error handler** -- Unhandled errors in Telegram update handlers are logged instead of crashing the process.
 - **Handler timeout** -- Telegraf's handler timeout is set to 10 minutes (up from 90 seconds) to accommodate long-running LLM responses.
 
